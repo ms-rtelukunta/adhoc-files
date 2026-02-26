@@ -1,0 +1,143 @@
+---
+trigger: none
+pr:
+  branches:
+    include:
+      - noTrigger
+schedules:
+  - cron: "0 0 * * 1-5"
+    displayName: Every night
+    branches:
+      include:
+        - main
+    always: true
+
+parameters:
+  - name: SCAN_TYPE
+    type: string
+    default: sandbox
+    values:
+      - sandbox
+      - policy
+  - name: SANDBOX_NAME
+    type: string
+    default: 'Monorepo Admin Sandbox'
+    values:
+      - 'Monorepo Admin Sandbox'
+      - 'Monorepo Admin Release Candidate'
+  - name: VERACODE_PROFILE
+    type: string
+    default: 'USA-ADV-concourse-apps'
+  - name: BRANCH
+    type: string
+    default: develop
+    
+  - name: adminObjects
+    type: object
+    default:
+      - repoName: admin-assets
+      - repoName: admin-configuration
+      - repoName: admin-gtm-offerings
+      - repoName: admin-header
+      - repoName: admin-home
+      - repoName: admin-offering-pdm-mapping
+      - repoName: admin-pdm-hierarchy
+      - repoName: admin-pdm-methodology
+      - repoName: admin-settings
+      - repoName: admin-shell
+      - repoName: admin-sidebar
+  - name: coreObjects
+    type: object
+    default:
+      - repoName: core-shell
+  - name: toolObjects
+    type: object
+    default:
+      - repoName: tools-shell
+  - name: libObjects
+    type: object
+    default:
+      - repoName: i18n
+      - repoName: ui-kit
+  - name: pluginObjects
+    type: object
+    default:
+      - repoName: react
+
+
+
+variables:
+  - name: BRANCH
+    value: ${{ parameters.BRANCH }}
+
+
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+resources:
+  repositories:
+
+    - repository: monorepo
+      type: github
+      name: pwc-us-adv-tech-enablement/concourse-apps
+      ref: refs/heads/main
+      endpoint: pwc-us-adv-tech-enablement
+
+stages:
+  - stage: 'veracodePrepare'
+    variables:
+      - group: ConcourseCore
+      - name: APP_DIR
+        value: ''
+      - name: BUILD_TYPE
+        value: 'nodejs'
+    jobs:
+      - job:
+        displayName: ZIP MONO REPO
+        variables: 
+          ARTIFACTS_DIR: $(Build.ArtifactStagingDirectory)
+        steps:
+          - checkout: monorepo
+            path: 's/monorepo'
+          - script: |
+              sudo npm install -g pnpm-lock-to-npm-lock
+              sudo pnpm-lock-to-npm-lock ./pnpm-lock.yaml
+              ls -l
+          - ${{ each adminObject in parameters.adminObjects }}:
+            - script: 'zip -r $(ARTIFACTS_DIR)/${{ adminObject.repoName }}.zip package-lock.json package.json apps/admin/${{ adminObject.repoName }}/* -x "*.spec.ts" -x "*.spec.tsx"  -x "*__test__*" -x "*__tests__*" -x "*/generate-env/*" -x node_modules'
+              displayName: Zip ${{ adminObject.repoName }}
+          - ${{ each coreObject in parameters.coreObjects }}:
+            - script: 'zip -r $(ARTIFACTS_DIR)/${{ coreObject.repoName }}.zip package-lock.json package.json apps/core/${{ coreObject.repoName }}/* -x "*.spec.ts" -x "*.spec.tsx"  -x "*__test__*" -x "*__tests__*" -x "*/generate-env/*" -x node_modules'
+              displayName: Zip ${{ coreObject.repoName }}
+          - ${{ each toolObject in parameters.toolObjects }}:
+            - script: 'zip -r $(ARTIFACTS_DIR)/${{ toolObject.repoName }}.zip package-lock.json package.json apps/tools/${{ toolObject.repoName }}/* -x "*.spec.ts" -x "*.spec.tsx"  -x "*__test__*" -x "*__tests__*" -x "*/generate-env/*" -x node_modules'
+              displayName: Zip ${{ toolObject.repoName }}
+          - ${{ each libObject in parameters.libObjects }}:
+            - script: 'zip -r $(ARTIFACTS_DIR)/${{ libObject.repoName }}.zip package-lock.json package.json libs/${{ libObject.repoName }}/* -x "*.spec.ts" -x "*.spec.tsx"  -x "*__test__*" -x "*__tests__*" -x "*/generate-env/*" -x node_modules'
+              displayName: Zip ${{ libObject.repoName }}
+          - ${{ each pluginObject in parameters.pluginObjects }}:
+            - script: 'zip -r $(ARTIFACTS_DIR)/${{ pluginObject.repoName }}.zip package-lock.json package.json tools/plugins/${{ pluginObject.repoName }}/* -x "*.spec.ts" -x "*.spec.tsx"  -x "*__test__*" -x "*__tests__*" -x "*/generate-env/*" -x node_modules'
+              displayName: Zip ${{ pluginObject.repoName }}
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: $(ARTIFACTS_DIR)
+              artifactName: 'monorepo-$(Build.BuildId)-veracode-drop'
+          - script: sudo apt-get install openjdk-11-jre openjdk-11-jdk
+          - ${{ if eq(parameters.SCAN_TYPE, 'sandbox') }}:
+              - task: Veracode@3.19.0
+                continueOnError: false
+                inputs:
+                  ConnectionDetailsSelection: 'Service Connection'
+                  AnalysisService: van-veracode-token
+                  # ConnectionDetailsSelection: 'Credentials'
+                  # apiId: $(VERACODE_API_KEY_ID)
+                  # apiKey: $(VERACODE_API_KEY_SECRET)
+                  veracodeAppProfile: ${{ parameters.VERACODE_PROFILE }}
+                  version: $(Build.BuildNumber)
+                  filepath: '$(ARTIFACTS_DIR)'
+                  sandboxName: '${{ parameters.SANDBOX_NAME }}'
+                  createSandBox: true
+                  importResults: true
+                  maximumWaitTime: 360
+                  optargs: '-exclude *.spec.ts,*.spec.tsx'
+                  failBuildIfUploadAndScanBuildStepFails: true
+                  failBuildOnPolicyFail: false

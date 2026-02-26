@@ -1,0 +1,158 @@
+## Generic Script Runner
+## How it works
+## - Optionally set inputs.target_environment to an Actions Environment name.
+##   That environment's Variables and Secrets are auto-injected into all steps in job run-script-env.
+## - This workflow only passes SCRIPT_PATH and RAW_INPUTS to your module; all other config/secrets
+##   should come from the selected Environment (recommended) or from repo/org/environment defaults.
+## - Use it to run a JS module on any branch/tag without dispatching another workflow.
+## Inputs
+## - target_ref: branch/tag to checkout
+## - script_path: JS module that exports run({ github, context, core, inputs })
+## - inputs_json: JSON sent to your module as inputs
+## - target_environment (optional): Actions Environment to inject vars/secrets
+
+name: Generic Script Runner
+run-name: Script Runner (ref=${{ inputs.target_ref }} script=${{ inputs.script_path }} env=${{ inputs.target_environment || 'none' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Branch or tag to checkout (e.g., feature/... or v1.2.3)'
+        required: true
+        type: string
+      script_path:
+        description: 'Path to JS module exporting run({ github, context, core, inputs })'
+        required: true
+        type: string
+      inputs_json:
+        description: 'JSON object passed to module as inputs (e.g., {"issue_number":"945","mode":"ensure"})'
+        required: false
+        type: string
+      target_environment:
+        description: 'Optional Actions Environment whose variables/secrets should be injected'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  run-script-env:
+    if: ${{ inputs.target_environment != '' }}
+    environment: ${{ inputs.target_environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs_json
+        run: |
+          if [ -n "${{ github.event.inputs.inputs_json }}" ]; then
+            echo '${{ github.event.inputs.inputs_json }}' | jq -e 'type=="object"' >/dev/null || { echo "inputs_json must be a JSON object"; exit 1; }
+          fi
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref }}
+      - name: Show provided inputs (sanitized)
+        run: |
+          echo "dispatcher_ref='${{ github.ref_name }}'"
+          echo "effective_target_ref='${{ github.event.inputs.target_ref }}'"
+          echo "script_path='${{ github.event.inputs.script_path }}'"
+          echo "inputs_json='${{ github.event.inputs.inputs_json }}'"
+          echo "target_environment='${{ github.event.inputs.target_environment }}'"
+      - name: Ensure script exists
+        env:
+          SCRIPT_PATH: ${{ github.event.inputs.script_path }}
+        run: |
+          set -e
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "Script file not found: $SCRIPT_PATH"
+            exit 1
+          fi
+          case "$SCRIPT_PATH" in
+            *.ts)
+              echo "ERROR: script_path points to a TypeScript file. Provide a built JS module path instead." >&2
+              exit 1
+              ;;
+          esac
+          echo "Found script at $SCRIPT_PATH"
+      - name: Run script module
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = process.env.SCRIPT_PATH;
+            if (!path) { core.setFailed('SCRIPT_PATH env not set'); return; }
+            if (!fs.existsSync(path)) { core.setFailed(`Script not found at ${path}`); return; }
+            let inputs = {};
+            const raw = process.env.RAW_INPUTS;
+            if (raw && raw.trim()) { try { inputs = JSON.parse(raw); } catch (e) { core.setFailed('Failed to parse inputs_json: ' + e.message); return; } }
+            core.info(`Requiring module: ${path}`);
+            const mod = require(path);
+            if (typeof mod.run !== 'function') { core.setFailed('Module does not export run()'); return; }
+            await mod.run({ github, context, core, inputs });
+        env:
+          SCRIPT_PATH: ${{ github.event.inputs.script_path }}
+          RAW_INPUTS: ${{ github.event.inputs.inputs_json }}
+          VARS_JSON: ${{ toJSON(vars) }}
+          # Map required secret(s) explicitly; secrets cannot be enumerated
+          PAT: ${{ secrets.PAT }}
+
+  run-script:
+    if: ${{ inputs.target_environment == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs_json
+        run: |
+          if [ -n "${{ github.event.inputs.inputs_json }}" ]; then
+            echo '${{ github.event.inputs.inputs_json }}' | jq -e 'type=="object"' >/dev/null || { echo "inputs_json must be a JSON object"; exit 1; }
+          fi
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref }}
+      - name: Show provided inputs (sanitized)
+        run: |
+          echo "dispatcher_ref='${{ github.ref_name }}'"
+          echo "effective_target_ref='${{ github.event.inputs.target_ref }}'"
+          echo "script_path='${{ github.event.inputs.script_path }}'"
+          echo "inputs_json='${{ github.event.inputs.inputs_json }}'"
+          echo "target_environment='(not set)'"
+      - name: Ensure script exists
+        env:
+          SCRIPT_PATH: ${{ github.event.inputs.script_path }}
+        run: |
+          set -e
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "Script file not found: $SCRIPT_PATH"
+            exit 1
+          fi
+          case "$SCRIPT_PATH" in
+            *.ts)
+              echo "ERROR: script_path points to a TypeScript file. Provide a built JS module path instead." >&2
+              exit 1
+              ;;
+          esac
+          echo "Found script at $SCRIPT_PATH"
+      - name: Run script module
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = process.env.SCRIPT_PATH;
+            if (!path) { core.setFailed('SCRIPT_PATH env not set'); return; }
+            if (!fs.existsSync(path)) { core.setFailed(`Script not found at ${path}`); return; }
+            let inputs = {};
+            const raw = process.env.RAW_INPUTS;
+            if (raw && raw.trim()) { try { inputs = JSON.parse(raw); } catch (e) { core.setFailed('Failed to parse inputs_json: ' + e.message); return; } }
+            core.info(`Requiring module: ${path}`);
+            const mod = require(path);
+            if (typeof mod.run !== 'function') { core.setFailed('Module does not export run()'); return; }
+            await mod.run({ github, context, core, inputs });
+        env:
+          SCRIPT_PATH: ${{ github.event.inputs.script_path }}
+          RAW_INPUTS: ${{ github.event.inputs.inputs_json }}
+          VARS_JSON: ${{ toJSON(vars) }}
+          # Map required secret(s) explicitly; secrets cannot be enumerated
+          PAT: ${{ secrets.PAT }}

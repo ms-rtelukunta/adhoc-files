@@ -1,0 +1,84 @@
+name: us-int
+trigger:
+  enabled: false
+pr:
+  branches:
+    include:
+    - none
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+  workspace:
+    clean: all
+resources:
+  repositories:
+  - repository: library
+    type: git
+    name: InfraDevOps/digital-cicd
+    ref: refs/heads/main
+parameters:
+- name: ENVIRONMENT
+  displayName: ENVIRONMENT
+  type: string
+  default: us-int
+  values:
+  - us-dev
+  - us-qa
+  - us-perf
+  - us-int
+  - us-stage
+  - apac-stage
+  - emea-stage
+- name: cfg
+  type: object
+  default:
+    endpoint: $(NETSPARKER_ENDPOINT)
+    scanWebSitesProfile: $(NETSPARKER_PROFILE_ID)
+    scanWebSites: $(NETSPARKER_WEBSITE_ID)
+    jobOptions:
+      timeoutInMinutes: 480
+    autoDownload: true
+- name: ctx
+  type: object
+  default:
+    name: "netsparker"
+    displayName: "netspartkerjob"
+variables:
+- group: infra-devops-secrets
+- group: ConcourseCore
+- group: us-int
+- name: 'ENVIRONMENT'
+  value: us-int
+stages:
+- stage: __default
+  jobs:
+  - job: netsparker
+    displayName: ''
+    timeoutInMinutes: 480
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      condition: false
+      inputs:
+        repository: none
+    - task: netsparker-cloud@1
+      inputs:
+        apiConnection: $(NETSPARKER_ENDPOINT)
+        scanTypes: 2
+        scanWebSites: $(NETSPARKER_WEBSITE_ID)
+        scanWebSitesProfile: $(NETSPARKER_PROFILE_ID)
+        buildFail: True
+        severity: DoNotFail
+        hasReport: True
+        reportType: ScanDetail
+        onlyUnconfirmedIssues: True
+        excludeAddressedIssues: True
+        ignoreFalsePositive: True
+        ignoreRiskAccepted: True
+        stopScan: True
+schedules:
+- cron: "0 22 * * *"
+  displayName: Daily DAST Scan
+  branches:
+    include:
+    - main
+  always: true
+

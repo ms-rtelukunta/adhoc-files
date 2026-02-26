@@ -1,0 +1,447 @@
+# =============================================================================
+# EXPANDED PIPELINE YAML (synthesized, not runnable)
+# Same logical structure as azure-pipelines.yml + templates/main/pipeline.yml@AzureTemplates
+# with all template references inlined. Comments indicate source of each block.
+# =============================================================================
+#
+# Unique ADO tasks used by this pipeline:
+#   - ArchiveFiles@2
+#   - ArtifactoryGenericDownload@1
+#   - AzureWebApp@1
+#   - CopyFiles@2
+#   - DownloadPipelineArtifact@2
+#   - NodeTool@0
+#   - Npm@1
+#   - PublishCodeCoverageResults@1
+#   - PublishPipelineArtifact@1
+#   - PublishTestResults@2
+#   - SonarQubeAnalyze@5
+#   - SonarQubePrepare@5
+#   - SonarQubePublish@5
+#
+# Other step types (no task): bash, pwsh, script, checkout, publish
+# =============================================================================
+
+# --- from LEAP-Host/azure-pipelines.yml ---
+resources:
+  repositories:
+    - repository: AzureTemplates
+      type: git
+      name: InfraDevOps/ado-templates
+      ref: refs/heads/feature/leap
+
+# --- from LEAP-Host/azure-pipelines.yml (template: ado-vars.yml + groups) ---
+variables:
+  - template: 'ado-vars.yml'
+  - group: 'leap-common'
+  - group: 'LEAP Common Configs'
+
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+  workspace:
+    clean: all
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - develop
+  paths:
+    exclude:
+      - mfe-azure-pipelines.yml
+      - blackduck-pipeline.yml
+
+# --- from templates/main/pipeline.yml (replaces template: validate.yml) ---
+stages:
+  # === Stage from templates/main/validate.yml ===
+  - stage: validate
+    jobs:
+      - job: check_global_variables
+        # from validate.yml: variables template ado-vars.yml@Self (APP_DIR='' => ado-vars.yml)
+        variables:
+          - template: ado-vars.yml
+        steps:
+          # --- from templates/main/variables-validation.yml (template: ../lib/validations/project-vars-validation.yml) ---
+          - bash: |
+              if [[ -z "$(PROJECT_NAME)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: PROJECT_NAME is required
+          - bash: |
+              if [[ -z "$(SERVICE_NAME)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: SERVICE_NAME is required
+          # --- from variables-validation.yml: pipeline-vars-validation.yml (COMPILE_JOB, BUILD_TYPE, ARTIFACT_TYPE, etc.) ---
+          - bash: |
+              shopt -s extglob
+              declare -u tempValue="$(COMPILE_JOB)"
+              declare -u tempEnum="TRUE|FALSE"
+              case $tempValue in
+                @($tempEnum) )
+                  echo passed validation;;
+                *)
+                  echo "##vso[task.complete result=Failed;]"
+              esac
+            displayName: COMPILE_JOB should be one of TRUE|FALSE
+          # --- from variables-validation.yml: sonar-vars-validation.yml ---
+          # (conditional on Sonar usage; LEAP has FLAG_SONAR_SCAN: false)
+          # --- from variables-validation.yml: veracode-vars-validation.yml ---
+          - bash: |
+              if [[ -z "$(VERACODE_SERVICE_CONNECTION)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: VERACODE_SERVICE_CONNECTION is required
+          # --- from variables-validation.yml: blackDuck-vars-validation.yml ---
+          - bash: |
+              if [[ -z "$(BLACKDUCK_PROJECT)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: BLACKDUCK_PROJECT is required
+          # --- from variables-validation.yml: artifactory-vars-validation.yml ---
+          - bash: |
+              if [[ -z "$(GENERIC_ARTIFACTORY_SERVICE_CONNECTION)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: GENERIC_ARTIFACTORY_SERVICE_CONNECTION is required
+          # --- from variables-validation.yml: dotNet, fireBase, kubernetes, nodeJS validations (conditional) ---
+
+  # === Stage from templates/main/pipeline.yml: PrValidation ===
+  - stage: PrValidation
+    condition: eq(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      # --- from templates/main/compile-job.yml ---
+      - job: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: env
+            displayName: Check Variables
+          # --- from compile-job.yml: template ../lib/set-release.yml ---
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+              else
+                echo "##vso[task.setvariable variable=REPO_NAME]$(Build.Repository.Name)"
+              fi
+            displayName: Set REPO_NAME
+          # (remaining set-release defaults omitted for length: DOCKERFILE_PATH, ARTIFACTORY_HOST, etc.)
+          - checkout: self
+            path: 's/$(REPO_NAME)'
+          - bash: echo $(Build.SourceBranchName)
+          # --- from compile-job.yml: BUILD_TYPE=nodejs => template ../lib/node-npm-compile.yml ---
+          - task: NodeTool@0
+            displayName: 'Use Node $(NODE_VERSION)'
+            inputs:
+              versionSpec: $(NODE_VERSION)
+              checkLatest: true
+          # --- from node-npm-compile.yml: NPMRC_CREATE=true => template npmrc-create.yml ---
+          - pwsh: |
+              New-Item -Path . -Name ".npmrc" -ItemType "file" -Value "registry=https://$(ARTIFACTORY_HOST):443/artifactory/api/npm/$(ARTIFACTORY_NPM_REPO)/ `n _auth =  $(NPM_Token) `n always-auth = true"
+              Get-Content -Path ./.npmrc
+            displayName: 'PS Set NPM Token'
+            workingDirectory: $(APP_DIR)
+          - task: Npm@1
+            displayName: 'Dependency Install'
+            inputs:
+              command: 'install'
+              verbose: true
+              workingDir: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          - task: Npm@1
+            condition: eq(variables.BUILD, 'true')
+            displayName: 'Build App'
+            inputs:
+              command: 'custom'
+              customCommand: $(CUSTOM_CMD)
+              workingDir: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+              verbose: true
+          # --- from compile-job.yml: template ../lib/publish.yml ---
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish'
+            inputs:
+              targetPath: $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)
+              artifactName: '$(SERVICE_NAME)-$(APP_VERSION)-drop'
+
+      # --- from templates/main/pr-job.yml: job sonar ---
+      - job: sonar
+        dependsOn: compile
+        condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_SONAR_SCAN, 'false'))
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # --- from pr-job: template ../lib/set-release.yml (abbreviated) ---
+          - bash: echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+            displayName: Set APP_VERSION
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # --- from pr-job: template ../lib/scans/sonarqube.yml ---
+          - script: export NODE_TLS_REJECT_UNAUTHORIZED=0
+          - task: SonarQubePrepare@5
+            displayName: 'Prepare analysis on SonarQube'
+            inputs:
+              SonarQube: $(SONAR_SERVICE_CONNECTION)
+              scannerMode: CLI
+              configMode: 'file'
+              configFile: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)sonar-project.properties'
+            continueOnError: true
+          - task: SonarQubeAnalyze@5
+            displayName: 'Run Code Analysis'
+            continueOnError: true
+          - task: SonarQubePublish@5
+            displayName: 'Publish Quality Gate Result'
+
+      # --- from templates/main/pr-job.yml: job veracode ---
+      - job: veracode
+        dependsOn: compile
+        condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_VERACODE_SCAN, 'false'))
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+            displayName: Set APP_VERSION
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          - script: pwd
+          # --- from pr-job: template ../lib/scans/veracode-pipeline-scan.yml ---
+          - bash: |
+              echo "Veracode"
+              curl -O -L https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [[ "${VERACODE_SCANFILE}"=="source.zip" ]]; then
+                find . -name "*.js" -print | zip $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/source.zip -@
+              fi
+              java -jar pipeline-scan.jar -f $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/$(VERACODE_SCANFILE) --veracode_api_id $(VERACODE_API_ID) --veracode_api_key $(VERACODE_API_KEY)
+            displayName: 'Run Veracode Pipeline Scan'
+
+      # --- from templates/main/pr-job.yml: job UnitTest ---
+      - job: UnitTest
+        dependsOn: compile
+        condition: eq(variables['Build.Reason'], 'PullRequest')
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+            displayName: Set APP_VERSION
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # --- from pr-job: template ../lib/unit-test.yml ---
+          - bash: |
+              if [[ -z "$(UNIT_TEST_CMD)" ]]; then
+                echo "Skip Unit Test"
+              else
+                npm $(UNIT_TEST_CMD)
+              fi
+            displayName: Unit Test
+          # --- from unit-test.yml: template ./publish-unit-test.yml ---
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: '$(TEST_RESULT_FORMAT)'
+              testResultsFiles: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(TEST_RESULT_FILES)'
+              searchFolder: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+              mergeTestResults: false
+              failTaskOnFailedTests: false
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'JaCoCo'
+              summaryFileLocation: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(JACOCO_COVERAGE_FILE)'
+              pathToSources: '$(Pipeline.Workspace)/s/$(REPO_NAME)/'
+              reportDirectory: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(JACOCO_REPORT_PATH)'
+
+  # === Stage from templates/main/pipeline.yml: build ===
+  - stage: build
+    condition: ne(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      # --- from templates/main/compile-job.yml (same as PrValidation compile) ---
+      - job: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: env
+            displayName: Check Variables
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+              else
+                echo "##vso[task.setvariable variable=REPO_NAME]$(Build.Repository.Name)"
+              fi
+            displayName: Set REPO_NAME
+          - checkout: self
+            path: 's/$(REPO_NAME)'
+          - bash: echo $(Build.SourceBranchName)
+          - task: NodeTool@0
+            displayName: 'Use Node $(NODE_VERSION)'
+            inputs:
+              versionSpec: $(NODE_VERSION)
+              checkLatest: true
+          - pwsh: |
+              New-Item -Path . -Name ".npmrc" -ItemType "file" -Value "registry=https://$(ARTIFACTORY_HOST):443/artifactory/api/npm/$(ARTIFACTORY_NPM_REPO)/ `n _auth =  $(NPM_Token) `n always-auth = true"
+              Get-Content -Path ./.npmrc
+            displayName: 'PS Set NPM Token'
+            workingDirectory: $(APP_DIR)
+          - task: Npm@1
+            displayName: 'Dependency Install'
+            inputs:
+              command: 'install'
+              verbose: true
+              workingDir: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          - task: Npm@1
+            condition: eq(variables.BUILD, 'true')
+            displayName: 'Build App'
+            inputs:
+              command: 'custom'
+              customCommand: $(CUSTOM_CMD)
+              workingDir: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+              verbose: true
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish'
+            inputs:
+              targetPath: $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)
+              artifactName: '$(SERVICE_NAME)-$(APP_VERSION)-drop'
+
+      # --- from templates/main/package-job.yml ---
+      - job: package
+        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+        dependsOn: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+            displayName: Set APP_VERSION
+          # --- from package-job: template ../lib/download-artifact.yml ---
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # --- from package-job: ARTIFACT_TYPE=azPublish => template ../lib/publish-artifacts.yml ---
+          - task: CopyFiles@2
+            displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
+            inputs:
+              SourceFolder: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+              Contents: |
+                **/*
+                !*.yml
+                !*.old
+                !src/**/*
+                !.artifactignore
+                !.git/**/*
+                !node_modules/**/*
+              TargetFolder: '$(Build.ArtifactStagingDirectory)'
+          - task: ArchiveFiles@2
+            displayName: 'Archive bin'
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)'
+              includeRootFolder: false
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(APP_VERSION).zip'
+          - publish: '$(Build.ArtifactStagingDirectory)/$(APP_VERSION).zip'
+            artifact: $(APP_VERSION)-drop
+
+  # === Stage from templates/main/deploy-stage.yml ===
+  - stage: deploy
+    condition: and(succeeded('build'), eq(variables['Build.SourceBranchName'], 'develop'))
+    dependsOn: build
+    jobs:
+      - job: vars
+        variables:
+          - template: ado-vars.yml
+      # In original deploy-stage.yml this job is under ${{ if eq(variables.CONTINUOUS_DEPLOYMENT, true) }} and ${{ if eq(variables.DEPLOYMENT_TYPE, 'webapp') }}
+      # --- from deploy-stage.yml: DEPLOYMENT_TYPE=webapp => template webapp-deployment-job.yml ---
+      - deployment: deploy
+        workspace:
+          clean: all
+        environment: $(ENVIRONMENT)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # --- from webapp-deployment-job: optional set-release when APP_VERSION not passed ---
+                - bash: |
+                    if [[ -z "$(DOCKER_TAG)" ]]; then
+                      echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+                    else
+                      echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+                    fi
+                  displayName: Set APP_VERSION
+                - bash: |
+                    if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                      REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                      echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                    else
+                      echo "##vso[task.setvariable variable=REPO_NAME]$(Build.Repository.Name)"
+                    fi
+                  displayName: Set REPO_NAME
+                # --- from webapp-deployment-job: template ../lib/generic-download.yml ---
+                - task: ArtifactoryGenericDownload@1
+                  inputs:
+                    artifactoryService: $(GENERIC_ARTIFACTORY_SERVICE_CONNECTION)
+                    specSource: 'taskConfiguration'
+                    fileSpec: |
+                      {
+                        "files": [
+                          {
+                            "pattern": "$(ARTIFACTORY_GENERIC_REPO)/$(ARTIFACTORY_GENERIC_REPO_PATH)/$(SERVICE_NAME)/$(APP_VERSION)/app.zip",
+                            "target": "app.zip"
+                          }
+                        ]
+                      }
+                  displayName: Download Zip
+                # --- from webapp-deployment-job: template ../lib/webapp-deploy.yml ---
+                - task: AzureWebApp@1
+                  condition: eq(variables.WEBAPP_SLOT, '')
+                  displayName: WebApp Deployment
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    appName: $(WEBAPP_NAME)
+                    package: '**/app.zip'
+                    deploymentMethod: $(WEBAPP_DEPLOYMENT_METHOD)
+                    appType: $(WEBAPP_TYPE)
+                    AppSettings: $(WEBAPP_SETTINGS)
+                    RuntimeStack: 'NODE|14-lts'
+                - task: AzureWebApp@1
+                  condition: ne(variables.WEBAPP_SLOT, '')
+                  displayName: WebApp Slot Deployment
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    appName: $(WEBAPP_NAME)
+                    package: '**/app.zip'
+                    deploymentMethod: $(WEBAPP_DEPLOYMENT_METHOD)
+                    appType: $(WEBAPP_TYPE)
+                    slotName: $(WEBAPP_SLOT)

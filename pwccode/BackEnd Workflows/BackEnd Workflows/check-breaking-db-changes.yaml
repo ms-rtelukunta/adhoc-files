@@ -1,0 +1,81 @@
+name: Check Breaking Database Changes
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    paths:
+      - 'apps/*/db-changelog/**'
+    branches:
+      - main
+      - release/**
+jobs:
+  check-breaking-changes:
+    name: Detect Breaking DB Changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files and check for breaking changes
+        id: breaking-check
+        run: |
+          ./.github/scripts/check-breaking-db-changes.sh \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }}
+
+      - name: Post breaking changes comment
+        if: steps.breaking-check.outputs.breaking_found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const breakingFound = '${{ steps.breaking-check.outputs.breaking_found }}';
+            const affectedServices = '${{ steps.breaking-check.outputs.affected_services }}';
+
+            // Read breaking details from temp file
+            let breakingDetails = '';
+            try {
+              breakingDetails = fs.readFileSync('/tmp/breaking_details.txt', 'utf8');
+            } catch (error) {
+              console.log('Could not read breaking details file');
+            }
+
+            if (breakingFound === 'true') {
+              let commentBody = `## ⚠️ Breaking Database Changes Detected\n\n`;
+
+              if (affectedServices.trim()) {
+                commentBody += `**🎯 Affected Services:** \`${affectedServices.trim().split(' ').join('`, `')}\`\n\n`;
+              }
+
+              if (breakingDetails) {
+                commentBody += `**🔍 Breaking Changes:**\n\n${breakingDetails}\n`;
+              }
+
+              commentBody += `**🛠️ Override Required**\n`;
+              commentBody += `Contact **@Tech-Enablement-Governors** or **@tech-enablement-devops** team to review and approve these breaking changes.`;
+
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: commentBody
+              });
+            }
+
+      - name: Fail on breaking changes
+        if: steps.breaking-check.outputs.breaking_found == 'true'
+        run: |
+          echo "❌ BREAKING DATABASE CHANGES DETECTED"
+          echo "The check-breaking-db-changes.sh script has already provided detailed output above."
+          echo "Please review the breaking changes and get approval from the required teams."
+          exit 1
+
+      - name: Success message
+        if: steps.breaking-check.outputs.breaking_found == 'false'
+        run: |
+          echo "✅ No breaking database changes detected in this PR"
+          echo ""
+          echo "🚀 Database changes are safe to proceed"

@@ -1,0 +1,31 @@
+# File: azure-pipelines.yml
+resources:
+  repositories:
+    - repository: AzureTemplates # In a different organization
+      #endpoint: pwc-us-adv-digital
+      type: git
+      name: InfraDevOps/ado-templates
+      ref: refs/heads/feature/leap
+
+variables:
+  - template: 'ado-vars.yml'
+  - group: 'leap-common'
+  - group: 'LEAP Common Configs'
+
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - refs/heads/develop
+      - refs/heads/main
+stages:
+  - template: templates/main/pipeline.yml@AzureTemplates
+    parameters:
+      APP_DIR: ''
+      NPMRC_CLEAR: ''
+      NPMRC_CREATE: ''
+      BUILD_TYPE: ${{ variables.BUILD_TYPE }}
+      UNIT_TEST_CMD: ${{ variables.UNIT_TEST_CMD }}

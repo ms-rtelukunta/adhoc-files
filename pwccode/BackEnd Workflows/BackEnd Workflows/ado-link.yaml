@@ -1,0 +1,16 @@
+name: 'Description contains AB# with a valid work item id'
+on: # rebuild any PRs for main branch changes
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches:
+      - develop
+      - release/*
+      - main
+jobs:
+  azure-board-link:
+    name: "Azure Board Link Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pwc-us-adv-tech-enablement/github-actions-pr-is-linked-to-work-item@main
+        env:
+            TITLE: ${{ github.event.pull_request.title }}

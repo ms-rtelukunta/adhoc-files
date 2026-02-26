@@ -1,0 +1,66 @@
+# File: scan-netsparker.yaml
+trigger: none
+pr:
+  branches:
+    include:
+    - none
+
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+  workspace:
+    clean: all
+
+resources:
+  repositories:
+  - repository: library
+    type: git
+    name: InfraDevOps/digital-cicd
+    ref: refs/heads/main
+
+    
+parameters:
+- name: ENVIRONMENT
+  displayName: ENVIRONMENT
+  type: string
+  default: us-int
+  values:
+    - us-dev
+    - us-qa
+    - us-perf
+    - us-int
+    - us-stage
+    - eu-stage
+- name: cfg
+  type: object
+  default:
+    endpoint: $(NETSPARKER_MS_ENDPOINT)
+    scanWebSitesProfile: $(NETSPARKER_MS_PROFILE_ID)
+    scanWebSites: $(NETSPARKER_MS_WEBSITE_ID)
+    jobOptions:
+      timeoutInMinutes: 480
+    autoDownload: true
+- name: ctx
+  type: object
+  default: 
+   name: "netsparker"
+   displayName: "netspartkerjob"
+ 
+variables:
+- group: infra-devops-secrets
+- group: ConcourseCore 
+- group: ${{ parameters.ENVIRONMENT }}
+- name: 'ENVIRONMENT'
+  value: ${{ parameters.ENVIRONMENT }}
+jobs:
+- template: templates/jobs/scan-netsparker.yaml@library
+  parameters:
+    cfg: ${{ parameters.cfg }}
+    ctx: ${{ parameters.ctx }}
+
+# schedules:
+# - cron: "0 22 * * *"
+#   displayName: Daily DAST Scan
+#   branches:
+#     include:
+#     - main
+#   always: true

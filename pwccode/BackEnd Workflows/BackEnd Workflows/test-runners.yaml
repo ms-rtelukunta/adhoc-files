@@ -1,0 +1,16 @@
+---
+name: test-workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on:
+      group: adv-tech-enablement-general
+
+    steps:
+      - name: Check Runners
+        shell: bash
+        run: |-
+          echo "Hello World!"

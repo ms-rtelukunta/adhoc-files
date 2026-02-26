@@ -1,0 +1,366 @@
+name:  Continous Integration NX
+
+on: # rebuild any PRs for main branch changes
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    branches:
+      - main
+      - release/**
+
+# only allow a single instance of this pipeline to run for any individual PR
+# (so PR-1 and PR-2 can both be running this, but not two simultaneous runs
+# against PR-1), also cancel existing runs for a PR if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  determine_affected:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      builds: ${{ steps.data.outputs.builds }}
+      tests: ${{ steps.data.outputs.tests }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx --userconfig .npmrc 
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      - name: Determine commit hashes, build candidates, and test candidates
+        id: data
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          # TODO: standardize cd_determine_projects to just determine_projects and be used in CI as well
+          #       to avoid needing this block of nearly duplicate code here
+
+          # prefer pr hash vs current/last commit hashes
+          head="${{ github.event.pull_request.head.sha || github.event.after }}"
+          builds=""
+          tests=""
+
+          # if last commit message has the [affect all] flag, then override and target all projects
+          if grep -qE '.*\[affect all\].*' <<< "$(git log "$head" -n 1 --pretty='format:%B' | tr -d '\n')"; then
+            builds=$(nx show projects --with-target build --json)
+            tests=$(nx show projects --with-target test --json)
+
+          # else juse use nx affected
+          else
+            # prefer pr hash vs current/last commit hashes
+            base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+            # get previous commit hash if outside of a pr and on new branch
+            if [ "$base" = "" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                base=$(git rev-parse --verify @~)
+            fi
+
+            builds=$(nx show projects --affected --with-target build --base="$base" --head="$head" --json)
+            tests=$(nx show projects --affected --with-target test --base="$base" --head="$head" --json)
+          fi
+
+          # expose affected projects list
+          echo "builds=$builds" >> $GITHUB_OUTPUT
+          echo "tests=$tests" >> $GITHUB_OUTPUT
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [ determine_affected ]
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJSON(needs.determine_affected.outputs.builds) }}
+    if: ${{ needs.determine_affected.outputs.builds != '[]' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx --userconfig .npmrc 
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      - name: Build ${{ matrix.value }}
+        run: |
+          nx build ${{ matrix.value }} --configuration=production
+
+  test:
+    runs-on:
+      group:  adv-tech-enablement-general
+    timeout-minutes: 30
+    needs: [ determine_affected ]
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJSON(needs.determine_affected.outputs.tests) }}
+    if: ${{ needs.determine_affected.outputs.tests != '[]' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          
+      - name: Install JDK
+        run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk && sudo apt-get install -y wget
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx --userconfig .npmrc 
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      - name: Jest test + coverage ${{ matrix.value }}
+        run: |
+          nx test ${{ matrix.value }} --ci --coverage --reporters="github-actions" --reporters="summary" --reporters="default" --reporters="jest-sonar" --testLocationInResults --forceExit --json --outputFile=jest-report.json
+
+      - name: Determine project path, move coverage output, and prepare sonarqube config
+        id: data
+        run: |
+          # get target dir including tools/libs/apps pathing
+          target_dir=$(find . -maxdepth 2 -type d -name ${{ matrix.value }})
+          target_dir="${target_dir#./}"
+          echo "target_dir=$target_dir" >> $GITHUB_OUTPUT
+
+          # move all coverage data to project dir including jest output
+          mv "./coverage/$target_dir" "$target_dir/coverage"
+          mv "$target_dir/jest-report.json" "$target_dir/coverage/jest-report.json"
+
+          # expose variable for triggering sonarqube scanning
+          do_sonar_scan=$(test -f "$target_dir/sonar-overrides.properties"; printf "$?")
+          echo "do_sonar_scan=$do_sonar_scan" >> $GITHUB_OUTPUT
+
+          # if project has a sonar-overrides.properties file, then prepare the final sonar-project.properties file
+          if [ "$do_sonar_scan" = "0" ]; then
+              awk -F= '!seen[$1]++' "$target_dir/sonar-overrides.properties" "./sonar-base.properties" > "$target_dir/sonar-project.properties"
+          fi
+
+      ######## BEGIN SONARQUBE #########
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@v4
+        if: ${{ steps.data.outputs.do_sonar_scan == '0' }}
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Configure additional scan options for PRs
+        id: branch_options
+        if: ${{ steps.data.outputs.do_sonar_scan == '0' }}
+        run: |
+          additional_options=""
+
+          if [ "${{ github.head_ref }}" != "" ]; then
+              additional_options="-Dsonar.pullrequest.key=${{ github.event.number }} -Dsonar.pullrequest.branch=${{ github.head_ref }} -Dsonar.pullrequest.base=${{ github.base_ref }}"
+          fi
+          echo "additional_options=$additional_options" >> $GITHUB_OUTPUT
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v5.2.0
+        if: ${{ steps.data.outputs.do_sonar_scan == '0' }}
+        with:
+          projectBaseDir: ${{ steps.data.outputs.target_dir }}
+          args: >
+            -X
+            -Dsonar.scanner.truststorePath=/home/runner/.sonar/ssl/truststore.p12
+            -Djavax.net.ssl.trustStore=/home/runner/.sonar/ssl/truststore.p12
+            -Djavax.net.ssl.keyStore=/home/runner/.sonar/ssl/truststore.p12
+            -Dsonar.scanner.truststorePassword=changeit
+            -Djavax.net.ssl.keyStorePassword=changeit 
+            -Djavax.net.ssl.trustStorePassword=changeit
+            -Dsonar.tests=test
+            ${{ steps.branch_options.outputs.additional_options }}
+        env:
+          SONAR_TOKEN: ${{ secrets.CONCOURSE_SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.CONCOURSE_SONAR_HOST }}
+          SONAR_ROOT_CERT: ${{ secrets.CONCOURSE_SONAR_ROOT_CERT }}
+
+      - name: Move sonarqube .scannerwork/ to project coverage/
+        if: ${{ steps.data.outputs.do_sonar_scan == '0' }}
+        run: |
+          mv "${{ steps.data.outputs.target_dir }}/.scannerwork" "${{ steps.data.outputs.target_dir }}/coverage"
+
+      - name: SonarQube Quality Gate check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        if: ${{ steps.data.outputs.do_sonar_scan == '0' }}
+        with:
+          scanMetadataReportFile: "${{ steps.data.outputs.target_dir }}/coverage/.scannerwork/report-task.txt"
+          pollingTimeoutSec: 600
+        env:
+          SONAR_TOKEN: ${{ secrets.CONCOURSE_SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.CONCOURSE_SONAR_HOST }}
+          SONAR_ROOT_CERT: ${{ secrets.CONCOURSE_SONAR_ROOT_CERT }}
+
+      ######## END SONARQUBE #########
+
+      - name: Upload coverage to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.value }}
+          path: ${{ steps.data.outputs.target_dir }}/coverage
+
+      - name: Publish coverage on PR
+        if: always()
+        uses: pwc-us-adv-tech-enablement/gh-action-jest-coverage-report@v2.3.1
+        with:
+          coverage-file: ${{ steps.data.outputs.target_dir }}/coverage/jest-report.json
+          base-coverage-file: ${{ steps.data.outputs.target_dir }}/coverage/jest-report.json
+          custom-title: "Coverage: ${{ matrix.value }}"
+          package-manager: pnpm
+
+  require_passing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [ determine_affected, build, test ]
+    if: ${{ always() }}
+    permissions:
+      actions: read
+      checks: read
+
+    steps:
+      - name: Require all builds and tests to pass
+        run: |
+          fail="false"
+
+          result="${{ needs.determine_affected.result }}"
+          if [ "$result" != "success" ]; then
+            echo "determine_affected not successful"
+            fail="true"
+          fi
+
+          result="${{ needs.build.result }}"
+          if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+            echo "all builds have not passed"
+            fail="true"
+          fi
+
+          result="${{ needs.test.result }}"
+          if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+            echo "all tests have not passed"
+            fail="true"
+          fi
+
+          if [ "$fail" = "true" ]; then
+            exit 1
+          fi

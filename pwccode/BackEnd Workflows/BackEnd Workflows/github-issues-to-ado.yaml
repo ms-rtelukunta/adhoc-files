@@ -1,0 +1,57 @@
+# One-way sync: GitHub Issues -> Azure DevOps Work Items
+# Creates and updates an ADO work item for each GitHub issue and mirrors new GitHub comments.
+# ADO changes do NOT flow back to GitHub.
+
+name: Sync GitHub Issues to Azure Boards
+run-name: Sync Issues→ADO • ${{ github.event.issue.number || inputs.issue_number || 'n/a' }} • ${{ github.event.action || github.event_name }} • by ${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to operate on (when manually invoked)'
+        required: true
+        type: number
+      mode:
+        description: 'Optional explicit mode (ensure/update/close/reopen/comment). If omitted, derived from event type.'
+        required: false
+        type: string
+      comment_body:
+        description: 'Comment body when mode=comment'
+        required: false
+        type: string
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  # Ensure only one sync job per issue runs at a time to prevent duplicate ADO work item creation.
+  group: issues-to-ado-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    # This job only runs for issue comments
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    environment: azure-board-sync
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run sync script
+        uses: actions/github-script@v7
+        env:
+          # Make repository/org variables available to the module
+          VARS_JSON: ${{ toJSON(vars) }}
+          # Map PAT explicitly
+          PAT: ${{ secrets.PAT }}
+        with:
+          script: |
+            const mod = require('.github/scripts/gh-issues-to-ado.js');
+            await mod.run({ github, context, core });
+

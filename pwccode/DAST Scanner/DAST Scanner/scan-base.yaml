@@ -1,0 +1,123 @@
+parameters:
+- name: cfg
+  type: object
+- name: ctx
+  type: object
+  default: null
+- name: download
+  type: boolean
+  default: true
+- name: scanSteps
+  type: object
+- name: prepareSteps
+  type: object
+  default: null
+- name: vars
+  type: object
+  default: null
+- name: targetPath
+  type: string
+  default: ''
+- name: artifacts
+  type: object
+  default: null
+
+jobs:
+- job: ${{coalesce(parameters.ctx.name, parameters.cfg.name)}}
+  displayName: ${{coalesce(parameters.ctx.display, parameters.cfg.display)}}
+  ${{ if parameters.artifacts }}:
+    dependsOn:
+    - ${{ each r in parameters.artifacts }}:
+      - ${{replace(coalesce(r.name, 'Job'),'-','_') }}
+    condition: succeeded()
+  ${{ if parameters.cfg.dependsOn }}:
+    dependsOn: ${{parameters.cfg.dependsOn }}
+    condition: succeeded()
+  ${{ if parameters.ctx.jobOptions }}:
+    ${{ each v in  parameters.ctx.jobOptions}}:
+      ${{ if parameters.cfg.jobOptions }}:
+        ${{ if ne(v.key, parameters.cfg.jobOptions[v.key]) }}:
+          ${{ v.key }}: ${{ v.value }}
+      ${{ else }}:
+        ${{ v.key }}: ${{ v.value }}
+  ${{ if parameters.cfg.jobOptions }}:
+    ${{ each v in parameters.cfg.jobOptions }}:
+      ${{ v.key }}: ${{ v.value }}
+  ${{ if parameters.cfg.agentPool }}:
+    pool:
+      vmImage: '${{ parameters.cfg.agentPool }}' # deprecated, to be removed
+  ${{ elseif parameters.cfg.pool }}:
+    pool: '${{ parameters.cfg.pool }}'
+
+  ${{ if or(parameters.vars ,parameters.cfg.variables)}}:
+    variables:
+    - ${{ each v in parameters.vars }}:
+      - ${{ v }}
+    - ${{ each v in parameters.cfg.variables }}:
+      - ${{ v }}
+  steps:
+  - ${{ if parameters.cfg.debug }}:
+    - bash: |
+        echo '
+        cfg: ${{convertToJson(parameters.cfg)}},
+        ctx: ${{convertToJson(parameters.ctx)}}
+        '
+    ####################### VAULT INTEGRATION ##########################
+  - ${{ if parameters.cfg.vault }}:
+    - template: ../steps/task-vault.yaml
+      parameters:
+        cfg: ${{ parameters.cfg.vault }}
+
+  - ${{ if parameters.download }}:
+    ####################### BEFORE DOWNLOAD ##########################
+    - ${{ each v in parameters.cfg.beforeDownload }}:
+      - ${{ v }}
+
+    #################### DOWNLOAD FILES ##############################
+    - ${{if eq(lower(coalesce(parameters.cfg.autoDownload,'true')),'true') }}:
+      - checkout: none
+      - template: ../steps/download-artifacts.yaml
+        parameters:
+          name: ${{coalesce(parameters.cfg.artifactName,'Build')}}
+          filterPattern: ${{coalesce(parameters.cfg.file,parameters.cfg.patterns,'**') }}
+          path: ${{coalesce(parameters.targetPath, '$(Build.SourcesDirectory)')}}
+          ${{ if parameters.cfg.specificBuild }}:
+            specific: ${{parameters.cfg.specificBuild}}
+
+    ####################### AFTER DOWNLOAD ###########################
+    - ${{ each v in parameters.cfg.afterDownload }}:
+      - ${{ v }}
+
+  ####################### COPY FILES ##########################
+  - ${{ if parameters.cfg.copyFiles }}:
+    - task: CopyFiles@2
+      inputs:
+        contents: ${{ parameters.cfg.copyFiles.contents }}
+        TargetFolder: ${{ parameters.cfg.copyFiles.targetFolder }}
+        SourceFolder: ${{ coalesce(parameters.cfg.copyFiles.sourceFolder, parameters.targetPath) }}
+
+  ###################### PREPARE ENVIRONMENTS ######################
+  - ${{ each v in parameters.prepareSteps }}:
+    - ${{ v }}
+
+
+  ####################### PREPROCESSOR #############################
+  - ${{ each v in parameters.cfg.beforeScan }}:
+    - ${{ v }}
+
+  ####################### SCAN #####################################
+  - ${{ if parameters.cfg.custom }}:
+    - ${{ each v in parameters.cfg.custom }}:
+      - ${{ v }}
+  - ${{ else }}:
+    - ${{ each v in parameters.scanSteps }}:
+      - ${{ v }}
+
+  ####################### POSTPROCESSOR ############################
+  - ${{if parameters.cfg.importFlaws }}:
+    - template: ../steps/task-veracode-flaw-importer.yaml
+      parameters:
+        cfg: ${{ parameters.cfg }}
+
+  - ${{ each v in parameters.cfg.postScan }}:
+    - ${{ v }}

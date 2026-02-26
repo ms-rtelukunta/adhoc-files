@@ -1,0 +1,78 @@
+name: e2e CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      override_targets:
+        type: choice
+        options:
+          - 'concourse-user-profile-svc-e2e'
+          - 'concourse-pursuit-scope-svc-e2e'
+
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+
+env:
+  IS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  ARTIFACTORY_DOCKER_REPO_PATH: ${{ vars.CONCOURSE_DOCKER_REGISTRY }}/concoursecore
+
+jobs:
+  determine_targets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Custom branch-based ci skip check
+        env:
+          GH_TOKEN: ${{ github.token }} # need to expose this for gh cli
+        run: .github/scripts/branch_skip_ci.sh
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+      
+      - name: Run e2e tests
+        run: |
+          nx e2e ${{inputs.override_targets}} --configuration=production --verbose

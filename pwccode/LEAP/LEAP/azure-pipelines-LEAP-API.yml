@@ -1,0 +1,35 @@
+# File: azure-pipelines.yml
+resources:
+  repositories:
+    - repository: AzureTemplates # In a different organization
+      #endpoint: pwc-us-adv-digital
+      type: git
+      name: InfraDevOps/ado-templates
+      ref: refs/heads/feature/leap-test
+
+variables:
+  - template: ado-vars.yml
+  - group: leap-common
+
+pool: dds-concourse-ubuntu2004-01
+  #vmImage: $(pool)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - develop
+      - release/*
+  paths:
+    exclude:
+      - azure-pipelines.yml
+      - azure-pipelines-pr.yml
+      - ado-vars.yml
+      - deploy-azure-pipelines.yml
+      - leap-api-nodocker.yml
+
+stages:
+  - template: templates/main/pipeline.yml@AzureTemplates
+    parameters:
+      APP_DIR: ''
+      NPMRC_CLEAR: ''

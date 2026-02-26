@@ -1,0 +1,342 @@
+name: Middleware CD
+run-name: ${{ (github.event.inputs.dry_run == 'true' && 'DRY RUN - ') || '' }}${{ github.event.before == '' && ((github.event.inputs.override_enable == 'true' && 'Manual Deployment - override') || 'Manual Deployment - affected') || '' }}
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+
+  workflow_dispatch:
+    inputs:
+      # this is a boolean enable/disable of whether or not to override the determine_targets job
+      # and instead build and deploy what's specified in override_targets (instead of nx affected)
+      override_enable:
+        description: |
+          Manually specify microservices?
+          (INSTEAD OF default nx affected compared to latest main)
+        type: boolean
+        default: false
+      override_targets:
+        description: |
+          Which microservices?
+          (space delimited list of microservices,
+          allows grep -ie compliant regex,
+          use 'all' [no quotes] to target everything)
+        type: string
+      dry_run:
+        description: |
+          DRY RUN?
+          (don't push any changes upstream to github or artifactory,
+          and don't trigger azure deployment pipelines)
+        type: boolean
+        default: false
+
+# only allow a single instance of ANY pipeline in the deployment group,
+# this is to prevent race conditions with versioning,
+# also DOESN'T cancel in progress runs when a new one is queued
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+
+env:
+  IS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  ARTIFACTORY_DOCKER_REPO_PATH: ${{ vars.CONCOURSE_DOCKER_REGISTRY }}/concoursecore
+
+jobs:
+  determine_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      target_projects: ${{ steps.data.outputs.target_projects }}
+      version: ${{ steps.version.outputs.version }}
+      build_id: ${{ steps.version.outputs.build_id }}
+
+    steps:
+      - name: Input validation
+        run: |
+          # force early failure if nothing specified for override_targets with overriding enabled
+          # xargs is just trimming whitespace
+          if [ "${{ github.event.inputs.override_enable }}" = "true" ] && [ "$(printf '${{ github.event.inputs.override_targets }}' | xargs)" = "" ]; then
+              echo "Invalid inputs; you MUST specify a matching target project if overriding targets"
+              exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Custom branch-based ci skip check
+        env:
+          GH_TOKEN: ${{ github.token }} # need to expose this for gh cli
+        run: .github/scripts/branch_skip_ci.sh
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      # this will increment the version and tag + push the new tag upstream
+      # it also updates the version in package.json which is NOT committed anywhere
+      # but is referenced by the Set version variables step
+      - name: Version increment
+        env:
+          GH_TOKEN: ${{ secrets.CONCOURSE_CORE_AUTOMATION_GH_PAT }}
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+          SOURCE_WORKFLOW: ${{ github.workflow }}
+          IS_FIRST_RUN: ${{ github.run_attempt == '1' }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: .github/scripts/version_increment.sh
+
+      - name: Set version variables
+        id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          version="$(jq -r .version < package.json)"
+          echo "version: $version"
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+          build_id="$(.github/scripts/get_build_id.sh)"
+          echo "build_id: $build_id"
+          echo "build_id=$build_id" >> $GITHUB_OUTPUT
+
+      - name: Determine targeted projects
+        id: data
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+          BASE: ${{ github.event.before }}
+          HEAD: ${{ github.event.after || github.sha }}
+          OVERRIDE_ENABLE: ${{ github.event.inputs.override_enable }}
+          OVERRIDE_TARGETS: ${{ github.event.inputs.override_targets }}
+        run: .github/scripts/cd_determine_targets.sh
+      - name: Output targeted deploy pipeline params
+        run: |
+          # Define a mapping for shortName and contextPath
+          declare -A service_metadata=(
+            ["concourse-appintegrations-mgmt-svc"]="appintegrationsmgmt,appintegrations-mgmt"
+            ["concourse-auth-svc"]="auth,auth"
+            ["concourse-chat-svc"]="chat,chat"
+            ["concourse-deliverables-svc"]="deliverables,deliverables"
+            ["concourse-deliverymap-svc"]="deliverymap,deliverymap"
+            ["concourse-digital-assets-svc"]="digitalAssets,digitalAssets"
+            ["concourse-engagement-svc"]="engagement,engagement"
+            ["concourse-integration-ai-svc"]="integrationai,integrationai"
+            ["concourse-integration-ipaas-svc"]="ipaas,ipaas"
+            ["concourse-integration-jira-svc"]="jira,jira"
+            ["concourse-integration-miro-svc"]="integrationmiro,miro-integration"
+            ["concourse-integration-ms365-sharepoint-svc"]="ms365,ms365-sharepoint"
+            ["concourse-integration-provision-svc"]="integrationprovision,provision"
+            ["concourse-integration-pwcinternal-svc"]="integrationpwcinternal,pwcinternal"
+            ["concourse-notification-svc"]="notification,notification"
+            ["concourse-pursuit-scope-svc"]="pursuitscope,pursuit-scope"
+            ["concourse-raid-svc"]="raid,raid"
+            ["concourse-reports-svc"]="reports,reports"
+            ["concourse-user-profile-svc"]="user,user-profile"
+            ["concourse-estimation-models-svc"]="estimationModels,estimation-models"
+          )
+
+          # Extract the service names from the matrix value
+          target_projects='${{ steps.data.outputs.target_projects}}'
+          if [ -z "$target_projects" ] || [ "$target_projects" == "[]" ]; then
+            echo "No targeted projects found."
+            exit 0
+          fi
+
+          # Get the buildId
+          buildId="${{ steps.version.outputs.build_id }}"
+
+          # Loop through each service and generate YAML
+          echo "Generating deploy pipeline params..."
+          for service_name in $(echo "$target_projects" | jq -r '.[]'); do
+            metadata="${service_metadata[$service_name]}"
+            if [ -z "$metadata" ]; then
+              echo "Error: Metadata not found for service $service_name"
+              exit 1
+            fi
+
+            # Split metadata into shortName and contextPath
+            IFS=',' read -r shortName contextPath <<< "$metadata"
+
+            # Set the branch to use to 'main' if github.ref_name is null
+            configBranch="${{ github.ref_name || 'main' }}"
+
+            # Default branchKey to configBranch, change only if not a release branch
+            branchKey="configBranch"
+            if [[ ! "${{ github.ref_name }}" == release/* ]]; then
+              branchKey="techEnablementConfigBranch"
+            fi
+
+            # Append to the YAML file
+            cat <<EOF >> "${buildId}.yaml"
+            - name: $service_name
+              shortName: $shortName
+              contextPath: $contextPath
+              buildId: $buildId
+              $branchKey: $configBranch
+          EOF
+          done
+
+          # Print the YAML for visibility
+          cat "${buildId}.yaml"
+      - name: Upload ${{ steps.version.outputs.build_id }}.yaml to Artifacts
+        if: ${{ steps.data.outputs.target_projects != '[]' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.build_id }}
+          path: "${{ steps.version.outputs.build_id }}.yaml"
+          if-no-files-found: error
+  build-and-push-docker-image:
+    runs-on: ubuntu-latest
+    needs: [ determine_targets ]
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJSON(needs.determine_targets.outputs.target_projects) }}
+    if: ${{ needs.determine_targets.outputs.target_projects != '[]' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      # apply latest git tag version (from determine_targets) to package.json to live in the built artifact
+      - name: Use version from determine_targets
+        run: |
+          sed -i -E 's/^(  "version": ").*(",)$/\1'"${{ needs.determine_targets.outputs.version }}"'\2/' "package.json"
+
+      - name: Login to Jfrog Docker Container Registry
+        uses: docker/login-action@v3
+        # don't login into artifactory if on dry run
+        # allow to run for the time being, as CONCOURSE_NPM_TOKEN has begun failing, but only on the docker build
+        #if: ${{ env.IS_DRY_RUN == 'false' }}
+        with:
+          registry: ${{ vars.CONCOURSE_DOCKER_REGISTRY }}
+          username: ${{ vars.CONCOURSE_DOCKER_USERNAME }}
+          password: ${{ secrets.CONCOURSE_DOCKER_PASSWORD }}
+
+      - name: Create Docker Image ${{ matrix.value }}
+        run: |
+          export COMMIT_MESSAGE="$(git log -1 --pretty=%B)"
+          echo "APP_VERSION ${APP_VERSION}"
+          echo "DOCKER_IMAGE_TAG $DOCKER_IMAGE_TAG"
+          echo "BUILD_URI $BUILD_URI"
+          echo "COMMIT_ID $COMMIT_ID"
+          echo "DEFINITION_ID $DEFINITION_ID"
+          echo "COMMIT_MESSAGE $COMMIT_MESSAGE"
+          echo "ARTIFACTORY_DOCKER_REPO_PATH $ARTIFACTORY_DOCKER_REPO_PATH"
+
+          nx create-image ${{ matrix.value }} --configuration=production
+        env:
+            NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+            DOCKER_IMAGE_TAG: ${{ needs.determine_targets.outputs.build_id }}
+            APP_VERSION: ${{ needs.determine_targets.outputs.version }}
+            BUILD_URI: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            COMMIT_ID: ${{ github.sha }}
+            DEFINITION_ID: ${{ github.workflow }}
+
+      - name: Push Docker Image ${{ matrix.value }}
+        # don't push docker image on dry run
+        if: ${{ env.IS_DRY_RUN == 'false' }}
+        run: |
+          nx push-image ${{ matrix.value }} --configuration=production
+        env:
+            NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+            DOCKER_IMAGE_TAG: ${{ needs.determine_targets.outputs.build_id }}
+            APP_VERSION: ${{ needs.determine_targets.outputs.version }}
+            BUILD_URI: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            COMMIT_ID: ${{ github.sha }}
+            DEFINITION_ID: ${{ github.workflow }}
+
+      - name: Trigger Azure CD Pipelines
+        uses: azure/cli@v2
+        # don't auto-deploy on dry run, or on releases unless it's a manual deploy
+        if: ${{ env.IS_DRY_RUN == 'false' && (github.event.before == '' || !contains(github.ref, 'release/')) }}
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az pipelines run --org "https://dev.azure.com/pwc-us-adv-digital/" --project "ConcourseCore" --folder-path "\\CICD - Digital Pipelines\\Tech Enablement Monorepo Backend" --name "mono-${{ matrix.value }}" --branch "${{ github.ref }}" --parameters "VERSION=$DOCKER_IMAGE_TAG" --verbose
+        env:
+          DOCKER_IMAGE_TAG: ${{ needs.determine_targets.outputs.build_id }}
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.CONCOURSE_CORE_AUTOMATION_ADO_PAT }}

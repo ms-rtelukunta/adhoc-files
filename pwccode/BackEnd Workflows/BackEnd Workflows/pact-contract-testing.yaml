@@ -1,0 +1,311 @@
+name: Pact Contract Testing
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches:
+      - main
+      - release/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PACT_BROKER_URL: ${{ vars.PACT_BROKER_URL }}
+  CONSUMER_VERSION: ${{ github.sha }}
+  PROVIDER_VERSION: ${{ github.sha }}
+  GIT_BRANCH: ${{ github.ref_name }}
+  ENVIRONMENT: us-dev
+  PUBLISH_PACTS: true
+  PUBLISH_VERIFICATION_RESULTS: true
+  PACT_BROKER_DISABLE_SSL_VERIFICATION: true
+  PACT_DO_NOT_TRACK: true
+
+jobs:
+  consumer-tests:
+    name: Consumer Contract Tests (Auth Service)
+    runs-on:
+      group:  adv-tech-enablement-general
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Get npm cache location
+      id: get_npm_cache
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm_cache=$(npm config get cache)
+        echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+    - name: Cache npm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+        key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-npm
+
+    - name: Install pnpm and nx
+      id: install_pnpm
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm install -g pnpm nx --userconfig .npmrc
+        pnpm_store=$(pnpm store path)
+        echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+    - name: Cache pnpm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-pnpm
+
+    - name: Install dependencies
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        pnpm install
+
+    - name: Create pacts directory
+      run: mkdir -p pacts/logs
+
+    - name: Determine base and head commits
+      id: commits
+      run: |
+        # prefer pr hash vs current/last commit hashes
+        head="${{ github.event.pull_request.head.sha || github.event.after }}"
+        base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+        # get previous commit hash if outside of a pr and on new branch
+        if [ "$base" = "" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=$(git rev-parse --verify @~)
+        fi
+
+        echo "base=$base" >> $GITHUB_OUTPUT
+        echo "head=$head" >> $GITHUB_OUTPUT
+
+    - name: Run consumer pact tests
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: npx nx affected --target=pact-test-consumer --base=${{ steps.commits.outputs.base }} --head=${{ steps.commits.outputs.head }} --parallel=1
+
+    - name: Upload pact files
+      uses: actions/upload-artifact@v4
+      with:
+        name: pact-files
+        path: pacts/*.json
+        retention-days: 30
+
+    - name: Publish pacts to broker
+      if: env.PUBLISH_PACTS == 'true'
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        pnpm install
+        npx nx affected --target=pact-publish --base=${{ steps.commits.outputs.base }} --head=${{ steps.commits.outputs.head }} --parallel=1
+
+  provider-tests:
+    name: Provider Contract Tests (User Profile Service)
+    runs-on:
+      group:  adv-tech-enablement-general
+    needs: consumer-tests
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Get npm cache location
+      id: get_npm_cache
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm_cache=$(npm config get cache)
+        echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+    - name: Cache npm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+        key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-npm
+
+    - name: Install pnpm and nx
+      id: install_pnpm
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm install -g pnpm nx --userconfig .npmrc
+        pnpm_store=$(pnpm store path)
+        echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+    - name: Cache pnpm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-pnpm
+
+    - name: Install dependencies
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        pnpm install
+
+    - name: Determine base and head commits
+      id: commits
+      run: |
+        # prefer pr hash vs current/last commit hashes
+        head="${{ github.event.pull_request.head.sha || github.event.after }}"
+        base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+        # get previous commit hash if outside of a pr and on new branch
+        if [ "$base" = "" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=$(git rev-parse --verify @~)
+        fi
+
+        echo "base=$base" >> $GITHUB_OUTPUT
+        echo "head=$head" >> $GITHUB_OUTPUT
+
+    - name: List available pacts for provider
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npx pact-broker list-latest-pact-versions \
+          --broker-base-url=${{ env.PACT_BROKER_URL }} \
+          --provider=concourse-user-profile-svc
+
+    - name: Run provider verification tests
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: npx nx affected --target=pact-test-provider --base=${{ steps.commits.outputs.base }} --head=${{ steps.commits.outputs.head }} --parallel=1
+
+  can-i-deploy:
+    name: Can I Deploy Check
+    runs-on:
+      group:  adv-tech-enablement-general
+    needs: [consumer-tests, provider-tests]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Get npm cache location
+      id: get_npm_cache
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm_cache=$(npm config get cache)
+        echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+    - name: Cache npm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+        key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-npm
+
+    - name: Install pnpm and nx
+      id: install_pnpm
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        npm install -g pnpm nx --userconfig .npmrc
+        pnpm_store=$(pnpm store path)
+        echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+    - name: Cache pnpm deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-pnpm
+
+    - name: Install dependencies
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        pnpm install
+
+    - name: Determine base and head commits
+      id: commits
+      run: |
+        # prefer pr hash vs current/last commit hashes
+        head="${{ github.event.pull_request.head.sha || github.event.after }}"
+        base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+        # get previous commit hash if outside of a pr and on new branch
+        if [ "$base" = "" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=$(git rev-parse --verify @~)
+        fi
+
+        echo "base=$base" >> $GITHUB_OUTPUT
+        echo "head=$head" >> $GITHUB_OUTPUT
+
+    - name: Check if auth service can be deployed
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        # Check if this specific version can be deployed
+        npx pact-broker can-i-deploy \
+          --pacticipant concourse-auth-svc \
+          --version ${{ env.CONSUMER_VERSION }} \
+          --broker-base-url ${{ env.PACT_BROKER_URL }}
+
+    - name: Check if user profile service can be deployed
+      env:
+        NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+      run: |
+        # Check if this specific version can be deployed
+        npx pact-broker can-i-deploy \
+          --pacticipant concourse-user-profile-svc \
+          --version ${{ env.PROVIDER_VERSION }} \
+          --broker-base-url ${{ env.PACT_BROKER_URL }}
+
+  notification:
+    name: Notify Results
+    runs-on:
+      group:  adv-tech-enablement-general
+    needs: [consumer-tests, provider-tests, can-i-deploy]
+    if: always()
+
+    steps:
+    - name: Notify success
+      if: needs.consumer-tests.result == 'success' && needs.provider-tests.result == 'success'
+      run: |
+        echo "✅ All Pact contract tests passed!"
+        echo "Consumer tests: ${{ needs.consumer-tests.result }}"
+        echo "Provider tests: ${{ needs.provider-tests.result }}"
+        echo "Can I Deploy: ${{ needs.can-i-deploy.result }}"
+
+    - name: Notify failure
+      if: needs.consumer-tests.result == 'failure' || needs.provider-tests.result == 'failure'
+      run: |
+        echo "❌ Pact contract tests failed!"
+        echo "Consumer tests: ${{ needs.consumer-tests.result }}"
+        echo "Provider tests: ${{ needs.provider-tests.result }}"
+        echo "Can I Deploy: ${{ needs.can-i-deploy.result }}"
+        exit 1

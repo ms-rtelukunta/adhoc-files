@@ -1,0 +1,452 @@
+# ===========================================================================
+# EXPANDED PIPELINE: azure-pipeline.yaml
+# All templates from InfraDevOps/digital-cicd@develop inlined.
+# Comments mark the originating template for every block.
+# Compile-time expressions (${{ }}) resolved for default parameters:
+#   ENVIRONMENT = dev | SUBSCRIPTION = concoursesearch-dev-connection | RUN_PYTEST = false
+# NOT runnable -- structural reference only.
+# ===========================================================================
+#
+# ---------------------------------------------------------------------------
+# ADO TASK INVENTORY (unique tasks used across all stages)
+# ---------------------------------------------------------------------------
+#
+#  #  | Task                           | Version | Stage(s) | Purpose
+# ----|--------------------------------|---------|----------|----------------------------------------
+#  1  | tagBuildOrRelease               | @0      | Build    | Tag the ADO build run with version metadata (branch, build number, appId)
+#  2  | Docker                          | @2      | Build    | Build and push Docker image to Artifactory container registry
+#  3  | DownloadPipelineArtifact        | @2      | Scans    | Download the "Build" pipeline artifact from the current run
+#  4  | ArtifactoryGenericDownload      | @3      | Scans    | Download Zulu JDK 17 archive from JFrog Artifactory generic repo
+#  5  | JavaToolInstaller               | @0      | Scans    | Install JDK 17 on the agent from a local archive
+#  6  | CmdLine                         | @2      | Scans    | Import SonarQube server TLS certificate into a Java truststore
+#  7  | Bash                            | @3      | Scans    | Auto-whitelist agent IP on SonarQube firewall via GCP Cloud Function
+#  8  | SonarQubePrepare                | @7      | Scans    | Configure the SonarQube CLI scanner (endpoint, project key, config file)
+#  9  | SonarQubeAnalyze                | @7      | Scans    | Execute SonarQube static code analysis
+# 10  | SonarQubePublish                | @7      | Scans    | Publish quality gate result back to ADO
+# 11  | JMeterInstaller                 | @0      | QATest   | Install Apache JMeter 5.4.2 on the Windows agent
+# 12  | PublishTestResults              | @2      | QATest   | Publish JUnit XML test results to the ADO Test tab
+# 13  | PublishPipelineArtifact         | @1      | QATest   | Publish JMeter test artifacts to the pipeline
+#
+# Built-in tasks (no marketplace extension):
+# 14  | publish (built-in keyword)      | --      | Build    | Publish pipeline artifact "Build" (success) / "Build-AttemptN" (failure)
+# 15  | script (built-in keyword)       | --      | Build, Pytest, QATest | Inline shell/cmd scripts
+# 16  | checkout (built-in keyword)     | --      | Scans    | "checkout: none" -- skip source checkout
+#
+# Service connections used:
+#   - w00014-pwc-us-digital-devops-docker.artifacts-west.pwc.com  (Docker registry, for Docker@2)
+#   - w00014-pwc-us-digital-devops-generic                        (JFrog Artifactory, for ArtifactoryGenericDownload@3)
+#   - sonar-service-connection                                    (SonarQube, for SonarQubePrepare@7)
+#
+# ---------------------------------------------------------------------------
+
+# ---------- source: azure-pipeline.yaml (root) ----------
+pool:
+  name: dds-concourse-ubuntu2004-01
+
+parameters:
+  - name: ENVIRONMENT
+    displayName: Environment
+    type: string
+    default: dev
+    values: [predev, dev, qa, stage, prod, emeaStage, emeaProd, apacStage, apacProd]
+  - name: SUBSCRIPTION
+    displayName: Subscription
+    type: string
+    default: concoursesearch-dev-connection
+    values:
+      - concoursesearch-dev-connection
+      - concoursesearch-qa-connection
+      - concoursesearch-stage-connection
+      - concoursesearch-prod-connection
+      - concoursearch-emea-stage-connection
+      - concoursearch-emea-prod-connection
+      - concoursearch-apac-stage-connection
+      - concoursearch-apac-prod-connection
+  - name: RUN_PYTEST
+    displayName: Run Pytest
+    type: boolean
+    default: false
+
+resources:
+  repositories:
+    - repository: cicd
+      type: git
+      name: InfraDevOps/digital-cicd
+      ref: develop
+
+# ===========================================================================
+# STAGES
+# ===========================================================================
+stages:
+
+  # =========================================================================
+  # STAGE 1: Build  (always runs)
+  # source: azure-pipeline.yaml  -->  build-docker.yaml@cicd  -->  build-base.yaml  -->  package-docker.yaml
+  # =========================================================================
+  - stage: Build
+    displayName: Build Stage
+    pool:
+      name: dds-concourse-ubuntu2004-01
+    variables:
+      - group: search-${{ parameters.ENVIRONMENT }}           # e.g. search-dev
+
+    jobs:
+      # -- source: build-docker.yaml → build-base.yaml --
+      # Effective cfg:
+      #   type: docker
+      #   registry: w00014-pwc-us-digital-devops-docker.artifacts-west.pwc.com
+      #   image: search-api/search-api
+      #   dockerfile: Dockerfile
+      #   dockerBuildArguments: (empty)
+      # Effective ctx:
+      #   ver: $(Build.SourceBranchName)-$(Build.BuildNumber)
+      # buildSteps: []  (passed from build-docker.yaml)
+
+      - job: ''                                                # coalesce(cfg.name, ctx.name) = null → empty
+        displayName: ''                                        # ctx.display = null → empty
+        # NOTE: cfg.dependsOn not set → no dependsOn
+        # NOTE: cfg.pool not set → inherits stage pool
+        # NOTE: cfg.jobOptions not set → nothing extra
+        # NOTE: vars / cfg.variables not set → no job-level variables
+
+        steps:
+          # ---- source: build-base.yaml ----
+          # cfg.checkout / ctx.checkout are not set → checkout step skipped
+
+          # 1) Tag the build
+          - task: tagBuildOrRelease@0                           # source: build-base.yaml
+            inputs:
+              type: 'Build'
+              tags: |
+                '$(Build.SourceBranchName)-$(Build.BuildNumber)'
+                "$(Build.SourceBranchName)-$(Build.BuildNumber)"
+                '$(appId)'
+
+          # 2) Echo app version
+          - script: echo '$(Build.SourceBranchName)-$(Build.BuildNumber)'  # source: build-base.yaml
+            displayName: AppVersion $(Build.SourceBranchName)-$(Build.BuildNumber)
+
+          # cfg.vault not set    → vault step skipped
+          # cfg.mock  not set    → mock branch skipped, entering real build path:
+          # prepareSteps = null  → nothing to iterate
+          # cfg.beforeBuild null → nothing
+          # cfg.replaceVariables not set → skipped
+          # cfg.customBuild not set → fall through to buildSteps
+          # buildSteps = []      → nothing to iterate   (docker build has no compile step)
+          # cfg.postBuild null   → nothing
+
+          # ---- PACKAGE (cfg.image IS set → package-docker.yaml is invoked) ----
+          # cfg.beforePackage null → nothing
+          # cfg.customPackage not set → fall through to default
+          # packageSteps = null  → nothing to iterate
+          # cfg.image = search-api/search-api → template ../steps/package-docker.yaml triggered
+
+          # ---- source: package-docker.yaml ----
+          # cfg.extraRegistries not set → no extra logins
+
+          # 3) Docker build
+          - task: Docker@2                                     # source: package-docker.yaml
+            displayName: 'docker build'                        # coalesce(ctx.display, 'docker build')
+            env:
+              DOCKER_BUILDKIT: '0'                             # coalesce(cfg.buildkit, '0')
+            inputs:
+              containerRegistry: w00014-pwc-us-digital-devops-docker.artifacts-west.pwc.com
+              repository: search-api/search-api
+              command: 'build'
+              # cfg.dockerfile does not start with '/' and ctx.rootPath is null
+              Dockerfile: Dockerfile                           # coalesce(cfg.dockerfile, '**/Dockerfile')
+              # cfg.dockerBuildContext not set → buildContext omitted
+              # cfg.dockerBuildArguments is empty → arguments omitted
+              tags: |
+                $(Build.SourceVersion)
+                $(Build.SourceBranchName)-$(Build.BuildNumber)
+
+          # 4) Docker push
+          - task: Docker@2                                     # source: package-docker.yaml
+            displayName: push
+            inputs:
+              containerRegistry: w00014-pwc-us-digital-devops-docker.artifacts-west.pwc.com
+              repository: search-api/search-api
+              command: 'push'
+              tags: |
+                $(Build.SourceVersion)
+                $(Build.SourceBranchName)-$(Build.BuildNumber)
+
+          # cfg.postPackage null → nothing
+
+          # ---- PUBLISH ---- source: build-base.yaml ----
+          # cfg.beforePublish null → nothing
+          # cfg.customPublish not set → fall through
+          # publishSteps = null → nothing to iterate
+          # cfg.uploadJfrog not set → skipped
+
+          # 5) Publish success artifact
+          - publish: ''                                        # coalesce(cfg.rootPath, ctx.rootPath) → empty
+            artifact: 'Build'                                  # coalesce(cfg.artifactName, ctx.artifactName, 'Build')
+            condition: succeeded()                             # source: build-base.yaml
+
+          # 6) Publish failure diagnostic artifact
+          - publish: ''                                        # same empty path
+            artifact: 'Build-Attempt$(System.JobAttempt)'
+            condition: failed()                                # source: build-base.yaml
+
+          # cfg.postPublish null → nothing
+
+  # =========================================================================
+  # STAGE 2: Scans  (runs after Build succeeds -- implicit sequential)
+  # source: azure-pipeline.yaml  -->  scan-sonar.yaml@cicd  -->  scan-base.yaml
+  #         + sonar-prepare.yaml  -->  install-jdk.yaml
+  #         + task-base.yaml (SonarQubePrepare@7)
+  # =========================================================================
+  - stage: Scans
+    displayName: Scans Stage
+    # no explicit pool → inherits pipeline-level dds-concourse-ubuntu2004-01
+
+    jobs:
+      # -- source: scan-sonar.yaml → scan-base.yaml --
+      # Effective cfg:
+      #   enabled: true
+      #   server: https://stage-sonar.pwc.com
+      #   endpoint: sonar-service-connection
+      #   projectKey: PwC-US-Digital-concoursesearch-backend-search-api
+      #   configFile: $(Pipeline.Workspace)/s/sonar-project.properties
+      # ctx: null
+
+      - job: ''                                                # coalesce(ctx.name, cfg.name) = null
+        displayName: ''                                        # coalesce(ctx.display, cfg.display) = null
+        # cfg.dependsOn / artifacts not set → no dependsOn
+        # cfg.agentPool / cfg.pool not set → inherits stage pool
+
+        variables:                                             # source: scan-sonar.yaml (vars param)
+          - name: SONAR_SCANNER_OPTS
+            value: -Djavax.net.ssl.trustStore=/tmp/trustStore.keystore -Djavax.net.ssl.trustStorePassword=changeit
+          - name: NODE_OPTIONS
+            value: --use-openssl-ca                            # cfg.nodeOptions is null → trailing space only
+
+        steps:
+          # cfg.debug not set → debug dump skipped
+          # cfg.vault not set → vault skipped
+
+          # ---- DOWNLOAD (download=true default, autoDownload defaults to 'true') ----
+          # source: scan-base.yaml
+          # cfg.beforeDownload null → nothing
+
+          # 1) Skip checkout
+          - checkout: none                                     # source: scan-base.yaml
+
+          # 2) Download build artifact
+          # source: scan-base.yaml → download-artifacts.yaml
+          - task: DownloadPipelineArtifact@2                   # source: download-artifacts.yaml
+            inputs:
+              artifactName: 'Build'                            # coalesce(cfg.artifactName, 'Build')
+              itemPattern: '**'                                # coalesce(cfg.file, cfg.patterns, '**')
+              targetPath: '$(Build.SourcesDirectory)'          # coalesce(targetPath, '$(Build.SourcesDirectory)')
+              buildType: 'current'                             # cfg.specificBuild not set → current
+
+          # cfg.afterDownload null → nothing
+          # cfg.copyFiles not set → skipped
+
+          # ---- PREPARE ENVIRONMENTS (prepareSteps = sonar-prepare.yaml) ----
+          # source: scan-sonar.yaml → sonar-prepare.yaml
+
+          # 3) Install JDK 17
+          # source: sonar-prepare.yaml → install-jdk.yaml
+          - task: ArtifactoryGenericDownload@3                  # source: install-jdk.yaml
+            displayName: Download Zulu JDK17
+            inputs:
+              connection: 'w00014-pwc-us-digital-devops-generic'    # coalesce(cfg.jdkConnection, default)
+              specSource: 'taskConfiguration'
+              fileSpec: |
+                {
+                  "files": [
+                    {
+                      "pattern": "w00014-pwc-us-digital-devops-generic/jdk/zulu17.30.16-sa-jdk17.0.1-linux_x64.tar.gz",
+                      "target": "$(Agent.TempDirectory)/zulu17.30.16-sa-jdk17.0.1-linux_x64.tar.gz"
+                    }
+                  ]
+                }
+              failNoOp: true
+
+          - task: JavaToolInstaller@0                           # source: install-jdk.yaml
+            inputs:
+              versionSpec: '17'
+              jdkArchitectureOption: 'x64'
+              jdkSourceOption: 'LocalDirectory'
+              jdkFile: '$(Agent.TempDirectory)/jdk/zulu17.30.16-sa-jdk17.0.1-linux_x64.tar.gz'
+              jdkDestinationDirectory: '$(agent.toolsDirectory)/jdk17'
+              cleanDestinationDirectory: true
+
+          # 4) Import SonarQube TLS certificate
+          # Condition: cfg.server == 'https://stage-sonar.pwc.com' → TRUE
+          #            cfg.agentPool != 'ubuntu-latest' → TRUE (self-hosted pool)
+          - task: CmdLine@2                                    # source: sonar-prepare.yaml
+            displayName: add certificate
+            inputs:
+              script: |
+                HOST=stage-sonar.pwc.com
+                openssl s_client -servername $HOST -connect $HOST:443 -showcerts </dev/null |  sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > /tmp/$HOST.crt
+                cat /tmp/$HOST.crt
+                keytool -importcert -file /tmp/$HOST.crt -alias $HOST -keystore /tmp/trustStore.keystore -storepass changeit --noprompt || echo "already present"
+
+          # 5) Auto-whitelist agent IP for SonarQube firewall
+          - task: Bash@3                                       # source: sonar-prepare.yaml
+            displayName: Sonar whitelist
+            inputs:
+              targetType: inline
+              script: |
+                ipaddr=$(curl ifconfig.me --silent)
+                echo $ipaddr
+
+                ret=$(curl -s -I 'https://stage-sonar.pwc.com' |grep -i HTTP| grep 200)
+                len=$(echo $ret| wc -c)
+                if [ $len -lt 2 ]
+                then
+                    vars="{\"key\":\"lncmbr5kax\",\"ip\":\"$ipaddr\",\"type\":\"add\"}"
+                    curl -k -d "$vars" -H 'Content-Type: application/json' -X POST 'https://us-central1-pg-us-e-app-268182.cloudfunctions.net/sqube'
+
+                    for counter in {1..20}
+                    do
+                        echo $counter
+                        sleep 30s
+                        ret=$(curl -s -I 'https://stage-sonar.pwc.com' |grep -i HTTP| grep 200)
+                        len=$(echo $ret| wc -c)
+                        if [ $len -gt 1 ]
+                        then
+                            break
+                        fi
+                    done
+                    sleep 30s
+                else
+                    echo "Already white listed"
+                fi
+
+          # Conditions for pwcinternal.com servers → FALSE (server is stage-sonar.pwc.com) → skipped
+
+          # ---- SCAN STEPS (scanSteps from scan-sonar.yaml) ----
+          # cfg.beforeScan null → nothing
+          # cfg.custom not set → use scanSteps
+
+          # 6) Prepare SonarQube analysis
+          # source: scan-sonar.yaml → task-base.yaml (wraps SonarQubePrepare@7)
+          - task: SonarQubePrepare@7                            # source: task-base.yaml
+            displayName: Prepare analysis on SonarQube
+            inputs:
+              # -- override section --
+              SonarQube: 'sonar-service-connection'             # cfg.endpoint
+              configFile: '$(Pipeline.Workspace)/s/sonar-project.properties'  # cfg.configFile is set
+              extraProperties: ''                               # cfg.extraProperties not set
+              # -- protected section --
+              scannerMode: 'CLI'
+              configMode: 'file'                                # cfg.configFile is set → file mode
+
+          # 7) Run SonarQube analysis
+          - task: SonarQubeAnalyze@7                            # source: scan-sonar.yaml (inline)
+            inputs:
+              jdkversion: 'JAVA_HOME_17_X64'
+
+          # 8) Publish quality gate result
+          - task: SonarQubePublish@7                            # source: scan-sonar.yaml (inline)
+            displayName: Publish Quality Gate Result
+            inputs:
+              pollingTimeoutSec: '300'
+
+          # cfg.importFlaws not set → veracode flaw importer skipped
+          # cfg.postScan null → nothing
+
+  # =========================================================================
+  # STAGE 3: Pytest  (CONDITIONAL -- compile-time removed when RUN_PYTEST = false)
+  # source: azure-pipeline.yaml (inline, no template)
+  # =========================================================================
+  - stage: Pytest
+    displayName: Pytest Stage
+    condition: eq('${{ parameters.RUN_PYTEST }}', 'true')      # compile-time: stage removed if false
+
+    jobs:
+      - job: RunPytest
+        displayName: Run Pytest
+        steps:
+          # 1) Install Python, dependencies, run pytest
+          - script: |                                          # source: azure-pipeline.yaml (inline)
+              sudo apt update
+              sudo apt install -y python3 python3-pip
+              python3 -m pip install --upgrade pip
+              python3 -m pip install -r requirements.txt
+              python3 -m pip install pytest pytest-azurepipelines pytest-cov protobuf
+              python3 -m pip freeze
+              pytest searchAPI/unittests/ --junitxml=junit/test-results.xml --cov=. --cov-report=xml
+            displayName: Run pytest
+          # WARNING: No PublishTestResults step -- JUnit XML is produced but never uploaded
+
+  # =========================================================================
+  # STAGE 4: QATest  (CONDITIONAL -- compile-time removed when ENVIRONMENT != qa)
+  # source: azure-pipeline.yaml  -->  qa-jmeter-test.yaml@cicd  -->  qa-base.yaml
+  # =========================================================================
+  - stage: QATest
+    pool:
+      name: InfraDevOpsAgents-Windows
+    displayName: 'Run QA Tests'
+    condition: eq('${{ parameters.ENVIRONMENT }}', 'qa')       # compile-time: stage removed if not qa
+
+    jobs:
+      # -- source: qa-jmeter-test.yaml → qa-base.yaml --
+      # Effective cfg:
+      #   cmd:
+      #     testDir: ./jmeter-test
+      #     startCmd: jmeter -n -t QA-Automation-Scripts/Concourse_Search.jmx -l api_report.jtl
+      #     reportCmd: python QA-Automation-Scripts/jtl_junit_converter.py api_report.jtl $(Pipeline.Workspace)/s/$(Build.BuildNumber)/outputxunit.xml
+      #   publishResultsFile: outputxunit.xml
+      # ctx: null
+      # cfg.docker not set → docker path skipped, cmd path taken
+
+      - job: ''                                                 # ctx.name = null
+        timeoutInMinutes: 1440                                  # coalesce(cfg.timeLimitInMinutes, '1440')
+        displayName: ''                                         # ctx.display = null
+        # cfg.pool not set → inherits stage pool (InfraDevOpsAgents-Windows)
+        # cfg.dependsOn not set, ctx.dependency null → dependsOn empty list
+        # cfg.mock not set → real test path
+
+        steps:
+          # ---- TEST STEPS (testSteps from qa-jmeter-test.yaml, cmd branch) ----
+
+          # 1) Install JMeter
+          - task: JMeterInstaller@0                             # source: qa-jmeter-test.yaml
+            inputs:
+              jmeterVersion: '5.4.2'                            # coalesce(cfg.cmd.jmeterVersion, '5.4.2')
+
+          # 2) Run JMeter test
+          - script: |                                           # source: qa-jmeter-test.yaml
+              mkdir -p $(Pipeline.Workspace)\s\$(Build.BuildNumber)
+              cd ./jmeter-test
+              jmeter -n -t QA-Automation-Scripts/Concourse_Search.jmx -l api_report.jtl
+            displayName: 'Run jmeter test for the Windows'
+
+          # 3) Convert JTL to JUnit XML
+          - script: |                                           # source: qa-jmeter-test.yaml
+              cd ./jmeter-test
+              python QA-Automation-Scripts/jtl_junit_converter.py api_report.jtl $(Pipeline.Workspace)/s/$(Build.BuildNumber)/outputxunit.xml
+            displayName: 'copy reports'
+
+          # cfg.postTest null → nothing
+
+          # ---- PUBLISH STEPS (publishSteps from qa-jmeter-test.yaml) ----
+          # cfg.beforePublish null → nothing
+          # cfg.customPublish not set → use publishSteps
+
+          # 4) Publish test results
+          - task: PublishTestResults@2                           # source: qa-jmeter-test.yaml
+            displayName: 'Publish result'
+            condition: succeededOrFailed()
+            timeoutInMinutes: 2
+            inputs:
+              testResultsFiles: $(Pipeline.Workspace)/s/$(Build.BuildNumber)/outputxunit.xml
+              failTaskOnFailedTests: true
+              testRunTitle: 'Test run title'
+
+          # 5) Publish test artifact
+          - task: PublishPipelineArtifact@1                      # source: qa-jmeter-test.yaml
+            displayName: 'Publish test artifact'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: $(Pipeline.Workspace)/s/$(Build.BuildNumber)
+              artifact: '$(Build.BuildNumber).zip'              # coalesce(cfg.artifactZipName, '$(Build.BuildNumber).zip')
+              publishLocation: 'pipeline'

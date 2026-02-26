@@ -1,0 +1,33 @@
+name: PR Title Check
+
+on:
+  pull_request:
+    types:
+      - opened       # when a PR is first opened
+      - edited       # when the PR title or body is edited
+      - reopened     # when a closed PR is reopened
+      - synchronize  # when new commits are pushed to the PR
+
+jobs:
+  title-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title
+        run: |
+          echo "Checking Pull Request title format..."
+
+          # Check if PR title contains AB#
+          if [[ "${{ github.event.pull_request.title }}" == *"AB#"* ]]; then
+            echo "❌ Title contains 'AB#'!"
+            exit 1
+          fi
+
+          regex="^(feature|bugfix|defect|cherry-pick|release|hotfix|patch)\ [0-9]+:\ .+$"
+
+          # Enforce <type> <number>: <short title>
+          if [[ ! "${{ github.event.pull_request.title }}" =~ $regex ]]; then
+            echo "❌ Title does not match <type> <number>: <short title>!"
+            exit 1
+          fi
+
+          echo "✅ Title looks good!"

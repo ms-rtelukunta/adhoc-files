@@ -1,0 +1,107 @@
+name: Offering Migration Job
+run-name: ${{ (github.event.inputs.dry_run == 'true' && 'DRY RUN - ') || '' }}${{ github.event.before == '' && ((github.event.inputs.override_enable == 'true' && 'Manual Deployment - override') || 'Manual Deployment - affected') || '' }}
+
+on:
+  workflow_dispatch:
+concurrency:
+  group: 'offering-migration-job'
+  cancel-in-progress: true
+
+env:
+  ARTIFACTORY_DOCKER_REPO_PATH: ${{ vars.CONCOURSE_DOCKER_REGISTRY }}/concoursecore
+
+jobs:
+  build-and-push-docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      - name: Install pnpm and nx
+        id: install_pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm nx
+          pnpm_store=$(pnpm store path)
+          echo "pnpm_store=$pnpm_store" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.install_pnpm.outputs.pnpm_store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm
+
+      - name: Install dependencies
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          pnpm install
+
+      - name: Login to Jfrog Docker Container Registry
+        uses: docker/login-action@v3
+        # don't login into artifactory if on dry run
+        # allow to run for the time being, as CONCOURSE_NPM_TOKEN has begun failing, but only on the docker build
+        #if: ${{ env.IS_DRY_RUN == 'false' }}
+        with:
+          registry: ${{ vars.CONCOURSE_DOCKER_REGISTRY }}
+          username: ${{ vars.CONCOURSE_DOCKER_USERNAME }}
+          password: ${{ secrets.CONCOURSE_DOCKER_PASSWORD }}
+
+      - name: Create Docker Image ${{ matrix.value }}
+        run: |
+          export COMMIT_MESSAGE="$(git log -1 --pretty=%B)"
+          echo "APP_VERSION ${APP_VERSION}"
+          echo "DOCKER_IMAGE_TAG $DOCKER_IMAGE_TAG"
+          echo "BUILD_URI $BUILD_URI"
+          echo "COMMIT_ID $COMMIT_ID"
+          echo "DEFINITION_ID $DEFINITION_ID"
+          echo "COMMIT_MESSAGE $COMMIT_MESSAGE"
+          echo "ARTIFACTORY_DOCKER_REPO_PATH $ARTIFACTORY_DOCKER_REPO_PATH"
+
+          docker build -t "$ARTIFACTORY_DOCKER_REPO_PATH/offering-migration-job:${DOCKER_IMAGE_TAG}" \
+            --build-arg NPM_TOKEN=${NPM_TOKEN} \
+            --build-arg APP_VERSION=${APP_VERSION} \
+            --build-arg BUILD_URI="${BUILD_URI}" \
+            --build-arg COMMIT_ID=${COMMIT_ID} \
+            -f ./tools/offerings-migration/Dockerfile .
+        env:
+            NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+            DOCKER_IMAGE_TAG: ${{ github.run_id }}
+            APP_VERSION: ${{ github.run_id }}
+            BUILD_URI: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            COMMIT_ID: ${{ github.sha }}
+
+      - name: Push Docker Image ${{ matrix.value }}
+        run: |
+          docker push $ARTIFACTORY_DOCKER_REPO_PATH/offering-migration-job:${DOCKER_IMAGE_TAG}
+        env:
+            NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+            DOCKER_IMAGE_TAG: ${{ github.run_id }}
+            APP_VERSION: ${{ github.run_id }}
+            BUILD_URI: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            COMMIT_ID: ${{ github.sha }}
+            DEFINITION_ID: ${{ github.workflow }}

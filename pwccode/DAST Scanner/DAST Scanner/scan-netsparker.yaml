@@ -1,0 +1,32 @@
+parameters:
+- name: cfg
+  type: object
+- name: ctx
+  type: object
+  default: null
+
+
+jobs:
+- template: ./scan-base.yaml
+  parameters:
+    cfg: ${{ parameters.cfg }}
+    ctx: ${{ parameters.ctx }}
+    download: ${{ coalesce(parameters.cfg.downloadArtifacts,'false')}}
+    prepareSteps:
+    - checkout: none
+    scanSteps:
+    - task: netsparker-cloud@1
+      inputs:
+        apiConnection: ${{ parameters.cfg.endpoint }}
+        scanTypes: ${{ coalesce(parameters.cfg.scanType,'2')}}
+        scanWebSites: ${{ parameters.cfg.scanWebSites }}
+        scanWebSitesProfile: ${{ parameters.cfg.scanWebSitesProfile }}
+        buildFail: ${{ coalesce(parameters.cfg.buildFail,'true')}}
+        severity: ${{ coalesce(parameters.cfg.severity,'DoNotFail')}}
+        hasReport: ${{ coalesce(parameters.cfg.hasReport,'true')}}
+        reportType: ${{ coalesce(parameters.cfg.reportType,'ScanDetail')}}
+        onlyUnconfirmedIssues: ${{ coalesce(parameters.cfg.onlyUnconfirmedIssues,'true')}}
+        excludeAddressedIssues: ${{ coalesce(parameters.cfg.excludeAddressedIssues,'true')}}
+        ignoreFalsePositive: ${{ coalesce(parameters.cfg.ignoreFalsePositive,'true')}}
+        ignoreRiskAccepted: ${{ coalesce(parameters.cfg.ignoreRiskAccepted,'true')}}
+        stopScan: ${{ coalesce(parameters.cfg.stopScan,'true')}}

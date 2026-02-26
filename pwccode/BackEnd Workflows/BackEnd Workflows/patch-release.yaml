@@ -1,0 +1,94 @@
+name: Patch Release
+run-name: ${{ (github.event.inputs.dry_run == 'true' && 'DRY RUN - ') || '' }}Patch Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_title:
+        description: "PR Title (not including workitem or pr type like feature/patch/etc)"
+        type: string
+        required: true
+      workitem_id:
+        description: "ADO Workitem ID (just the number)"
+        type: number
+        required: true
+      commit_hashes:
+        description: "Commit hashes (space delimited list of commit hashes to cherry-pick):"
+        type: string
+        required: true
+      dry_run:
+        description: |
+          DRY RUN?
+          (don't push any changes upstream to github or artifactory,
+          and don't trigger azure deployment pipelines)
+        type: boolean
+        default: false
+
+env:
+  IS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+jobs:
+  patch-release:
+    # only allow patching release branches
+    if: ${{ contains(github.ref, 'release/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cut patch branch & create PR
+        env:
+          GH_TOKEN: ${{ secrets.CONCOURSE_CORE_AUTOMATION_GH_PAT }}
+        run: |
+          git config --global user.email "concourse.core.automation@pwc.com"
+          git config --global user.name "concourse-core-automation_pwcit"
+
+          # set version in package.json from git tags (not tracked on branch, just used for pwc_compliant_version here)
+          sed -i -E 's/^(  "version": ").*(",)$/\1'"$(.github/scripts/get_version_from_tags.sh)"'\2/' "package.json"
+
+          base_branch="$(git branch --show-current | tr -d '\n')"
+          patch_branch="patch/$(.github/scripts/pwc_compliant_version.sh)"
+
+          # cut patch branch
+          git checkout -b "$patch_branch"
+
+          # sort refs by oldest to newest
+          #   - prints each hash with it's commit number and a newline
+          #   - sorts by the second column, which is it's commit number after the space
+          #   - then removes the second column so that it's only the hash
+          #   - this results in the return print being newline delimited sorted list of hashes
+          sort_hashes() {
+              hashes="$@"
+              for hash in ${hashes}; do
+                  printf "$hash $(git rev-list $hash --count)\n"
+              done | sort -t " " -k2n | cut -d " " -f1
+          }
+          sorted_hashes="$(sort_hashes "${{ github.event.inputs.commit_hashes }}")"
+
+          # cherry pick specified hashes
+          for hash in ${sorted_hashes}; do
+              git cherry-pick "$hash"
+          done
+
+          # handle dry run
+          if [ "$IS_DRY_RUN" = "false" ]; then
+              # push upstream
+              git push origin "$patch_branch"
+
+              # create pr
+              gh pr create --base "$base_branch" --head "$patch_branch" \
+                --title "patch ${{ github.event.inputs.workitem_id }}: ${{ github.event.inputs.pr_title }}" \
+                --body "AB#${{ github.event.inputs.workitem_id }}"
+          else
+              echo "dry run, not actually pushing upstream"
+              git push --dry-run origin "$patch_branch"
+
+              echo "dry run, not actually creating pr"
+              echo "command: gh pr create --base \"$base_branch\" --head \"$patch_branch\" \
+                --title \"patch ${{ github.event.inputs.workitem_id }}: ${{ github.event.inputs.pr_title }}\" \
+                --body \"AB#${{ github.event.inputs.workitem_id }}\""
+          fi

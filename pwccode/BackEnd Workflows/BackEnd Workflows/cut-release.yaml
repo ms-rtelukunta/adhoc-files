@@ -1,0 +1,124 @@
+name: Cut Release
+run-name: ${{ (github.event.inputs.dry_run == 'true' && 'DRY RUN - ') || '' }}Cut Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: |
+          DRY RUN?
+          (don't push any changes upstream to github or artifactory,
+          and don't trigger azure deployment pipelines)
+        type: boolean
+        default: false
+
+# only allow a single instance of ANY pipeline in the deployment group,
+# this is to prevent race conditions with versioning,
+# also DOESN'T cancel in progress runs when a new one is queued
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+
+env:
+  IS_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+jobs:
+  cut-release:
+    # only allow cutting releases from main
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # disable default GITHUB_TOKEN credentials so we can use service account PAT instead
+          persist-credentials: false
+
+      # configure git to use the service account PAT (GH_TOKEN) for all https pushes to github.com
+      - name: Configure Git auth (service PAT)
+        env:
+          GH_TOKEN: ${{ secrets.CONCOURSE_CORE_AUTOMATION_GH_PAT }}
+        run: |
+          git config --global user.email "concourse.core.automation@pwc.com"
+          git config --global user.name "concourse-core-automation_pwcit"
+          # map any https github URL to include the PAT (avoids embedding in individual commands)
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get npm cache location
+        id: get_npm_cache
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm_cache=$(npm config get cache)
+          echo "npm_cache=$npm_cache" >> $GITHUB_OUTPUT
+
+      - name: Cache npm deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.get_npm_cache.outputs.npm_cache }}
+          key: ${{ runner.os }}-npm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-npm
+
+      #TODO: can potentially remove pnpm as a req if we use npm version, considering it looks like pnpm version just calls npm version
+      - name: Install pnpm
+        env:
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+        run: |
+          npm install -g pnpm
+
+      # this will increment the version and tag + push the new tag upstream
+      # it also updates the version in package.json which is NOT committed anywhere
+      # but is referenced by the branch_cut step
+      - name: Version increment
+        # never re-run this step if someone re-runs the workflow
+        if: ${{ github.run_attempt == '1' }}
+        env:
+          GH_TOKEN: ${{ secrets.CONCOURSE_CORE_AUTOMATION_GH_PAT }}
+          NPM_TOKEN: ${{ secrets.CONCOURSE_NPM_TOKEN }}
+          SOURCE_WORKFLOW: ${{ github.workflow }}
+          IS_FIRST_RUN: ${{ github.run_attempt == '1' }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: .github/scripts/version_increment.sh
+
+      # this will trigger the middleware cd on push to release branch since we're NOT using the
+      # out-of-the-box github actions PAT on the checkout, and still persisting credentials (default)
+      - name: Cut release branch & push upstream
+        id: branch_cut
+        env:
+          GH_TOKEN: ${{ secrets.CONCOURSE_CORE_AUTOMATION_GH_PAT }}
+        run: |
+          branch="release/$(.github/scripts/pwc_compliant_version.sh)"
+          version="$(jq -r '.version' < 'package.json')"
+          echo "branch=$branch" >> $GITHUB_OUTPUT
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+          git checkout -b "$branch"
+
+          # handle dry run
+          if [ "$IS_DRY_RUN" = "false" ]; then
+              git push --follow-tags origin "$branch"
+          else
+              echo "dry run, not actually pushing upstream"
+              echo "command: git push --follow-tags origin \"$branch\""
+          fi
+
+      - name: Cut ConcourseCore release branch
+        uses: azure/cli@v2
+        # only run when previous step succeeded
+        if: ${{ steps.branch_cut.outcome == 'success' }}
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az pipelines run --org "https://dev.azure.com/pwc-us-adv-digital/" --project "ConcourseCore" --folder-path "\\CICD - Digital Pipelines\\Tech Enablement Monorepo Backend" --name "concoursecore-cut-release" --parameters "VERSION=$VERSION" "RELEASE_BRANCH=$RELEASE_BRANCH" "DRY_RUN=$IS_DRY_RUN" --verbose 
+        env:
+          VERSION: ${{ steps.branch_cut.outputs.version }}
+          RELEASE_BRANCH: ${{ steps.branch_cut.outputs.branch }}
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.CONCOURSE_CORE_AUTOMATION_ADO_PAT }}

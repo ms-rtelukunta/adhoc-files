@@ -1,0 +1,681 @@
+# =============================================================================
+# SYNTHESIZED EXPANDED PIPELINE — same logical structure as azure-pipelines.yml
+# with templates replaced by inlined stages/jobs/steps. Source templates from
+# AzureTemplates (InfraDevOps/ado-templates @ feature/leap-test). Not runnable
+# as-is (variable group refs, template repo refs, and parameterized conditionals
+# are preserved or commented). Structurally accurate for analysis.
+#
+# Remaining template refs: "template: ado-vars.yml" (local variables file) and
+# "group: leap-common" left as-is; only stage/job/step templates were expanded.
+#
+# Unique ADO tasks used by this pipeline:
+#   - ArtifactoryDocker@1
+#   - ArtifactoryGenericDownload@1
+#   - AzureWebApp@1
+#   - Docker@2
+#   - DotNetCoreCLI@2
+#   - DownloadPipelineArtifact@2
+#   - PublishBuildArtifacts@1
+#   - PublishCodeCoverageResults@1
+#   - PublishPipelineArtifact@1
+#   - PublishTestResults@2
+#   - SonarQubeAnalyze@5
+#   - SonarQubePrepare@5
+#   - SonarQubePublish@5
+#   - UseDotNet@2
+# =============================================================================
+
+# --- from: azure-pipelines.yml (root) ---
+resources:
+  repositories:
+    - repository: AzureTemplates
+      type: git
+      name: InfraDevOps/ado-templates
+      ref: refs/heads/feature/leap-test
+
+variables:
+  # from: template ado-vars.yml (local)
+  - template: ado-vars.yml
+  - group: leap-common
+
+pool: dds-concourse-ubuntu2004-01
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - develop
+      - release/*
+  paths:
+    exclude:
+      - azure-pipelines.yml
+      - azure-pipelines-pr.yml
+      - ado-vars.yml
+      - deploy-azure-pipelines.yml
+      - leap-api-nodocker.yml
+
+stages:
+  # ===========================================================================
+  # from: templates/main/pipeline.yml → template: validate.yml
+  # from: templates/main/validate.yml
+  # ===========================================================================
+  - stage: validate
+    jobs:
+      - job: check_global_variables
+        variables:
+          # from: validate.yml — template: ${{ parameters.APP_DIR }}ado-vars.yml@Self (APP_DIR='' → ado-vars.yml from Self/LEAP-API)
+          - template: ado-vars.yml
+        steps:
+          # from: templates/main/validate.yml → template: variables-validation.yml
+          # from: templates/main/variables-validation.yml (parameters.globalVariables = ${{ variables }})
+          # --- validation steps (each originally template: ../lib/validations/<name>.yml) ---
+          # 1. project-vars-validation.yml → basic/non-empty-validation.yml (PROJECT_NAME, SERVICE_NAME)
+          - bash: |
+              if [[ -z "$(PROJECT_NAME)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: PROJECT_NAME is required
+          - bash: |
+              if [[ -z "$(SERVICE_NAME)" ]]; then
+                echo validation failed.
+                echo "##vso[task.complete result=Failed;]"
+              fi
+            displayName: SERVICE_NAME is required
+          # 2. pipeline-vars-validation.yml (pipelineDetails) — multiple steps; omitted for brevity
+          # 3. sonar-vars-validation.yml (sonarDetails)
+          # 4. veracode-vars-validation.yml (veracodeDetails)
+          # 5. blackDuck-vars-validation.yml (blackDuckDetails)
+          # 6. artifactory-vars-validation.yml (artifactoryDetails)
+          # 7. dotNet-vars-validation.yml (dotNetDetails)
+          # 8. fireBase-vars-validation.yml (fireBaseDetails)
+          # 9. kubernetes-vars-validation.yml (k8sDetails)
+          # 10. nodeJS-vars-validation.yml (nodeJSDetails)
+
+  # ===========================================================================
+  # from: templates/main/pipeline.yml — stage PrValidation
+  # condition: eq(variables['Build.Reason'], 'PullRequest')
+  # ===========================================================================
+  - stage: PrValidation
+    condition: eq(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      # --- from: template compile-job.yml (parameters.APP_DIR: '') ---
+      - job: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # from: compile-job.yml — if ne(variables.Agent.OS, 'Windows_NT')
+          - bash: env
+            displayName: Check Variables
+          # from: compile-job.yml — if eq(variables.CHECKOUT_INFRA_REPO, 'true') → skipped for LEAP-API
+          # from: templates/lib/set-release.yml
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo "This should set APP_VERSION to be used throughout the pipeline"
+                echo "$(Build.SourceBranchName)-$(Build.BuildNumber)"
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo "Use DOCKER_TAG: $(DOCKER_TAG)"
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              echo "set REPO_NAME"
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then
+                  echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"
+                fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then
+                  echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"
+                fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then
+                echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'
+              fi
+            displayName: Set Dockerfile
+          - bash: |
+              if [[ -z "$(ARTIFACTORY_HOST)" ]]; then
+                echo '##vso[task.setvariable variable=ARTIFACTORY_HOST]artifacts.pwc.com'
+              fi
+            displayName: Set Artifactory Host
+          - bash: |
+              if [[ -z "$(DOCKER_CUSTOM_ARGUMENT)" ]]; then
+                echo '##vso[task.setvariable variable=DOCKER_CUSTOM_ARGUMENT]--build-arg APP_VERSION=${APP_VERSION}'
+              fi
+            displayName: Default Variable DOCKER_CUSTOM_ARGUMENT
+          - bash: |
+              if [[ -z "$(WEBAPP_SETTINGS)" ]]; then
+                echo '##vso[task.setvariable variable=WEBAPP_SETTINGS]-DEFAULT-VAR test'
+              fi
+            displayName: Default Variable WEBAPP_SETTINGS
+          - bash: |
+              if [[ -z "$(TEST_RESULT_FILES)" ]]; then
+                echo '##vso[task.setvariable variable=TEST_RESULT_FILES]**/TEST-*.xml'
+              fi
+            displayName: SET TEST_RESULT_FILES
+          - bash: |
+              if [[ -z "$(TEST_RESULT_FORMAT)" ]]; then
+                echo '##vso[task.setvariable variable=TEST_RESULT_FORMAT]JUnit'
+              fi
+            displayName: SET TEST_RESULT_FORMAT
+          - bash: |
+              if [[ -z "$(JACOCO_COVERAGE_FILE)" ]]; then
+                echo '##vso[task.setvariable variable=JACOCO_COVERAGE_FILE]**/jacoco.xml'
+              fi
+            displayName: SET JACOCO_COVERAGE_FILE
+          - bash: |
+              if [[ -z "$(JACOCO_REPORT_PATH)" ]]; then
+                echo '##vso[task.setvariable variable=JACOCO_REPORT_PATH]**/jacoco'
+              fi
+            displayName: SET JACOCO_REPORT_PATH
+          - bash: |
+              if [[ -z "$(K8S_AKVS)" ]]; then
+                echo '##vso[task.setvariable variable=K8S_AKVS]false'
+              fi
+            displayName: SET K8S_AKVS
+          - bash: |
+              if [[ -z "$(VERACODE_SCANFILE)" ]]; then
+                echo '##vso[task.setvariable variable=VERACODE_SCANFILE]target/*.jar'
+              fi
+            displayName: SET VERACODE_SCANFILE
+          - bash: |
+              if [[ -z "$(HELM_CHART_YAML)" ]]; then
+                echo '##vso[task.setvariable variable=HELM_CHART_YAML]${SERVICE_NAME}/values.yaml'
+              fi
+            displayName: SET HELM_CHART_YAML
+          - bash: |
+              if [[ -z "$(COMPILE_INSIDE_DOCKERFILES)" ]]; then
+                echo '##vso[task.setvariable variable=COMPILE_INSIDE_DOCKERFILE]false'
+              fi
+            displayName: SET COMPILE_INSIDE_DOCKERFILE
+          - bash: |
+              if [[ -z "$(BLOB_DESTINATION_PATH)" ]]; then
+                echo '##vso[task.setvariable variable=BLOB_DESTINATION_PATH]/'
+              fi
+            displayName: Default Variable BLOB_DESTINATION_PATH
+          - bash: |
+              if [[ -z "$(MAVEN_SKIP_TESTS)" ]]; then
+                echo '##vso[task.setvariable variable=MAVEN_SKIP_TESTS]true'
+              fi
+            displayName: SET MAVEN_SKIP_TESTS
+          - bash: |
+              if [[ -z "$(JDKVERSION)" ]]; then
+                echo '##vso[task.setvariable variable=JDKVERSION]1.11'
+              fi
+            displayName: SET JDKVERSION
+          - bash: |
+              if [[ -z "$(MAVEN_VERSION)" ]]; then
+                echo '##vso[task.setvariable variable=MAVEN_VERSION]3.6.0'
+              fi
+            displayName: SET MAVEN_VERSION
+          # from: compile-job.yml
+          - checkout: self
+            path: 's/$(REPO_NAME)'
+          - bash: echo $(Build.SourceBranchName)
+          # from: compile-job.yml — when BUILD_TYPE == 'dotNetCore' (templates/lib/dotnet-build.yml)
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: $(DOTNET_VERSION)
+          - task: DotNetCoreCLI@2
+            displayName: 'dotNet Restore Dependencies'
+            inputs:
+              command: restore
+              projects: $(DOTNET_SOLUTION)
+              workingDirectory: $(APP_DIR)
+          - task: DotNetCoreCLI@2
+            displayName: 'dotNet Build'
+            inputs:
+              projects: $(DOTNET_SOLUTION)
+              arguments: '-c $(DOTNET_BUILD_CONFIG) --no-restore'
+              workingDirectory: $(APP_DIR)
+          # from: templates/lib/dotnet-publish.yml
+          - task: DotNetCoreCLI@2
+            displayName: 'Publish for Docker'
+            condition: eq(variables.ARTIFACT_TYPE, 'docker')
+            inputs:
+              command: publish
+              publishWebProjects: True
+              projects: $(DOTNET_SOLUTION)
+              arguments: '-c $(DOTNET_BUILD_CONFIG) --no-restore -o $(build.artifactstagingdirectory)'
+          - task: DotNetCoreCLI@2
+            condition: ne(variables.ARTIFACT_TYPE, 'docker')
+            displayName: Publish
+            inputs:
+              command: publish
+              publishWebProjects: True
+              projects: $(DOTNET_SOLUTION)
+              arguments: '-c $(DOTNET_BUILD_CONFIG) -o $(build.artifactstagingdirectory)'
+              zipAfterPublish: True
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Artifact'
+            inputs:
+              PathtoPublish: '$(build.artifactstagingdirectory)'
+          # from: compile-job.yml — when ARTIFACT_TYPE == 'docker': docker-pull (if DOCKER_IMAGE_DEPENDENCY_NAME set), docker-build, docker-push (when not PR)
+          - task: ArtifactoryDocker@1
+            displayName: 'Artifactory Docker pull'
+            inputs:
+              command: pull
+              artifactoryService: $(DOCKER_ARTIFACTORY_SERVICE_CONNECTION)
+              sourceRepo: $(DOCKER_IMAGE_DEPENDENCY_REPO)
+              imageName: $(DOCKER_IMAGE_DEPENDENCY_NAME)
+          - task: Docker@2
+            displayName: Docker Build
+            inputs:
+              repository: "$(ARTIFACTORY_DOCKER_REPO).$(ARTIFACTORY_HOST)/$(ARTIFACTORY_DOCKER_REPO_PATH)/$(SERVICE_NAME)"
+              command: build
+              Dockerfile: "$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/$(DOCKERFILE_PATH)"
+              arguments: $(DOCKER_CUSTOM_ARGUMENT)
+              tags: |
+                $(APP_VERSION)
+          # docker-push omitted in PrValidation (condition: ne(variables['Build.Reason'], 'PullRequest'))
+          # from: templates/lib/publish.yml
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish'
+            inputs:
+              targetPath: $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)
+              artifactName: '$(SERVICE_NAME)-$(APP_VERSION)-drop'
+
+      # --- from: template pr-job.yml — job sonar ---
+      - job: sonar
+        dependsOn: compile
+        condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_SONAR_SCAN, 'false'))
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # from: templates/lib/set-release.yml (abbrev — same bash blocks as in compile job)
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+            displayName: Set Dockerfile
+          # from: templates/lib/download-artifact.yml
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # from: templates/lib/scans/sonarqube.yml (parameters.SONAR_URL: $(SONAR_URL))
+          - script: export NODE_TLS_REJECT_UNAUTHORIZED=0
+          - bash: |
+              ipaddr=$(curl ifconfig.me --silent)
+              ret=$(curl -s -I 'https://stage-sonar.pwc.com' | grep -i HTTP | grep 200)
+              len=$(echo $ret| wc -c)
+              if [ $len -lt 2 ]; then
+                vars="{\"key\":\"lncmbr5kax\",\"ip\":\"$ipaddr\",\"type\":\"add\"}"
+                curl -k -d "$vars" -H 'Content-Type: application/json' -X POST 'https://us-central1-pg-us-e-app-268182.cloudfunctions.net/sqube'
+                for counter in {1..20}; do sleep 30s; ret=$(curl -s -I 'https://stage-sonar.pwc.com' | grep -i HTTP | grep 200); len=$(echo $ret| wc -c); if [ $len -gt 1 ]; then break; fi; done
+                sleep 30s
+              fi
+            displayName: 'Add IP to Whitelist - SonarQube'
+            # condition in template: ${{ if eq(parameters.SONAR_URL, 'https://stage-sonar.pwc.com') }}
+          - task: SonarQubePrepare@5
+            displayName: 'Prepare analysis on SonarQube'
+            inputs:
+              SonarQube: $(SONAR_SERVICE_CONNECTION)
+              scannerMode: CLI
+              configMode: 'file'
+              configFile: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)sonar-project.properties'
+            continueOnError: true
+          - task: SonarQubeAnalyze@5
+            displayName: 'Run Code Analysis'
+            continueOnError: true
+          - task: SonarQubePublish@5
+            displayName: 'Publish Quality Gate Result'
+
+      # --- from: template pr-job.yml — job veracode ---
+      - job: veracode
+        dependsOn: compile
+        condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_VERACODE_SCAN, 'false'))
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # from: templates/lib/set-release.yml
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+            displayName: Set Dockerfile
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # from: pr-job.yml (inline step)
+          - script: pwd
+          # from: templates/lib/scans/veracode-pipeline-scan.yml
+          - bash: |
+              echo "Veracode"
+              curl -O -L https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [[ "${VERACODE_SCANFILE}"=="source.zip" ]]; then
+                find . -name "*.js" -print | zip $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/source.zip -@
+              fi
+              java -jar pipeline-scan.jar -f $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/$(VERACODE_SCANFILE) --veracode_api_id $(VERACODE_API_ID) --veracode_api_key $(VERACODE_API_KEY)
+            displayName: 'Run Veracode Pipeline Scan'
+
+      # --- from: template pr-job.yml — job UnitTest ---
+      - job: UnitTest
+        dependsOn: compile
+        condition: eq(variables['Build.Reason'], 'PullRequest')
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # from: templates/lib/set-release.yml
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+            displayName: Set Dockerfile
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # from: templates/lib/unit-test.yml
+          - bash: |
+              if [[ -z "$(UNIT_TEST_CMD)" ]]; then
+                echo "Skip Unit Test"
+              else
+                if [[ "$(COMPILE_JOB)" = "true" ]]; then
+                  if [[ "$(BUILD_TYPE)" == "dotNetCore" ]]; then
+                    dotnet $(UNIT_TEST_CMD)
+                  fi
+                fi
+              fi
+            displayName: Unit Test
+          # from: templates/lib/publish-unit-test.yml
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: '$(TEST_RESULT_FORMAT)'
+              testResultsFiles: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(TEST_RESULT_FILES)'
+              searchFolder: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+              mergeTestResults: false
+              failTaskOnFailedTests: false
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'JaCoCo'
+              summaryFileLocation: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(JACOCO_COVERAGE_FILE)'
+              pathToSources: '$(Pipeline.Workspace)/s/$(REPO_NAME)/'
+              reportDirectory: '$(Pipeline.Workspace)/s/$(REPO_NAME)/${JACOCO_REPORT_PATH}'
+
+  # ===========================================================================
+  # from: templates/main/pipeline.yml — stage build
+  # condition: ne(variables['Build.Reason'], 'PullRequest')
+  # ===========================================================================
+  - stage: build
+    condition: ne(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      # --- from: template compile-job.yml (same as PrValidation compile; docker-push included) ---
+      - job: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          - bash: env
+            displayName: Check Variables
+          # from: templates/lib/set-release.yml
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+            displayName: Set Dockerfile
+          - checkout: self
+            path: 's/$(REPO_NAME)'
+          - bash: echo $(Build.SourceBranchName)
+          # dotnet-build.yml
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: $(DOTNET_VERSION)
+          - task: DotNetCoreCLI@2
+            displayName: 'dotNet Restore Dependencies'
+            inputs:
+              command: restore
+              projects: $(DOTNET_SOLUTION)
+              workingDirectory: $(APP_DIR)
+          - task: DotNetCoreCLI@2
+            displayName: 'dotNet Build'
+            inputs:
+              projects: $(DOTNET_SOLUTION)
+              arguments: '-c $(DOTNET_BUILD_CONFIG) --no-restore'
+              workingDirectory: $(APP_DIR)
+          # dotnet-publish.yml
+          - task: DotNetCoreCLI@2
+            displayName: 'Publish for Docker'
+            condition: eq(variables.ARTIFACT_TYPE, 'docker')
+            inputs:
+              command: publish
+              publishWebProjects: True
+              projects: $(DOTNET_SOLUTION)
+              arguments: '-c $(DOTNET_BUILD_CONFIG) --no-restore -o $(build.artifactstagingdirectory)'
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Artifact'
+            inputs:
+              PathtoPublish: '$(build.artifactstagingdirectory)'
+          # docker-pull, docker-build, docker-push (non-PR)
+          - task: ArtifactoryDocker@1
+            displayName: 'Artifactory Docker pull'
+            inputs:
+              command: pull
+              artifactoryService: $(DOCKER_ARTIFACTORY_SERVICE_CONNECTION)
+              sourceRepo: $(DOCKER_IMAGE_DEPENDENCY_REPO)
+              imageName: $(DOCKER_IMAGE_DEPENDENCY_NAME)
+          - task: Docker@2
+            displayName: Docker Build
+            inputs:
+              repository: "$(ARTIFACTORY_DOCKER_REPO).$(ARTIFACTORY_HOST)/$(ARTIFACTORY_DOCKER_REPO_PATH)/$(SERVICE_NAME)"
+              command: build
+              Dockerfile: "$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)/$(DOCKERFILE_PATH)"
+              arguments: $(DOCKER_CUSTOM_ARGUMENT)
+              tags: |
+                $(APP_VERSION)
+          - task: ArtifactoryDocker@1
+            displayName: 'Docker Push - Artifactory'
+            inputs:
+              command: 'push'
+              artifactoryService: $(DOCKER_ARTIFACTORY_SERVICE_CONNECTION)
+              targetRepo: $(ARTIFACTORY_DOCKER_REPO)
+              imageName: "$(ARTIFACTORY_DOCKER_REPO).$(ARTIFACTORY_HOST)/$(ARTIFACTORY_DOCKER_REPO_PATH)/$(SERVICE_NAME):$(APP_VERSION)"
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish'
+            inputs:
+              targetPath: $(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)
+              artifactName: '$(SERVICE_NAME)-$(APP_VERSION)-drop'
+
+      # --- from: template package-job.yml ---
+      - job: package
+        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+        dependsOn: compile
+        variables:
+          - template: ado-vars.yml
+        workspace:
+          clean: all
+        steps:
+          # CHECKOUT_INFRA_REPO not true for LEAP-API — skipped
+          # from: templates/lib/set-release.yml
+          - bash: |
+              if [[ -z "$(DOCKER_TAG)" ]]; then
+                echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+              else
+                echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+              fi
+            displayName: Set APP_VERSION
+          - bash: |
+              if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              else
+                REPO="$(Build.Repository.Name)"
+                echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+              fi
+            displayName: Set REPO_NAME
+          - bash: |
+              if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+            displayName: Set Dockerfile
+          # from: templates/lib/download-artifact.yml
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: $(SERVICE_NAME)-$(APP_VERSION)-drop
+              path: '$(Pipeline.Workspace)/s/$(REPO_NAME)/$(APP_DIR)'
+          # LEAP-API: DEPLOYMENT_TYPE=webapp, ARTIFACT_TYPE=docker — no kubernetes/firebase/zip/azPublish/argocd steps
+
+  # ===========================================================================
+  # from: templates/main/pipeline.yml → template: deploy-stage.yml
+  # condition: and(succeeded('build'), eq(variables['Build.SourceBranchName'], 'develop'))
+  # ===========================================================================
+  - stage: deploy
+    condition: and(succeeded('build'), eq(variables['Build.SourceBranchName'], 'develop'))
+    dependsOn: build
+    jobs:
+      - job: vars
+        variables:
+          - template: ado-vars.yml
+
+      # from: deploy-stage.yml — when CONTINUOUS_DEPLOYMENT and DEPLOYMENT_TYPE == 'webapp' → template: webapp-deployment-job.yml
+      - deployment: deploy
+        workspace:
+          clean: all
+        environment: $(ENVIRONMENT)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # from: webapp-deployment-job.yml — when length(parameters.APP_VERSION) == 0 (set-release)
+                - bash: |
+                    if [[ -z "$(DOCKER_TAG)" ]]; then
+                      echo '##vso[task.setvariable variable=APP_VERSION]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+                    else
+                      echo '##vso[task.setvariable variable=APP_VERSION]$(DOCKER_TAG)'
+                    fi
+                  displayName: Set APP_VERSION
+                - bash: |
+                    if [[ "$(Build.Repository.Name)" == *"/"* ]]; then
+                      REPO=`echo $(Build.Repository.Name) | awk -F"/" '{print $2}'`
+                      echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                      if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+                    else
+                      REPO="$(Build.Repository.Name)"
+                      echo "##vso[task.setvariable variable=REPO_NAME]$REPO"
+                      if [[ -z "$(INFRA_REPO)" ]]; then echo "##vso[task.setvariable variable=INFRA_REPO]$REPO"; fi
+                    fi
+                  displayName: Set REPO_NAME
+                - bash: |
+                    if [[ -z "$(DOCKERFILE_PATH)" ]]; then echo '##vso[task.setvariable variable=DOCKERFILE_PATH]Dockerfile'; fi
+                  displayName: Set Dockerfile
+                # from: templates/lib/generic-download.yml
+                - task: ArtifactoryGenericDownload@1
+                  inputs:
+                    artifactoryService: $(GENERIC_ARTIFACTORY_SERVICE_CONNECTION)
+                    specSource: 'taskConfiguration'
+                    fileSpec: |
+                      {
+                        "files": [
+                          {
+                            "pattern": "$(ARTIFACTORY_GENERIC_REPO)/$(ARTIFACTORY_GENERIC_REPO_PATH)/$(SERVICE_NAME)/$(APP_VERSION)/app.zip",
+                            "target": "app.zip"
+                          }
+                        ]
+                      }
+                  displayName: Download Zip
+                # from: templates/lib/webapp-deploy.yml
+                - task: AzureWebApp@1
+                  condition: eq(variables.WEBAPP_SLOT, '')
+                  displayName: WebApp Deployment
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    appName: $(WEBAPP_NAME)
+                    package: '**/app.zip'
+                    deploymentMethod: $(WEBAPP_DEPLOYMENT_METHOD)
+                    appType: $(WEBAPP_TYPE)
+                    AppSettings: $(WEBAPP_SETTINGS)
+                    RuntimeStack: 'NODE|14-lts'
+                - task: AzureWebApp@1
+                  condition: ne(variables.WEBAPP_SLOT, '')
+                  displayName: WebApp Slot Deployment
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    appName: $(WEBAPP_NAME)
+                    package: '**/app.zip'
+                    deploymentMethod: $(WEBAPP_DEPLOYMENT_METHOD)
+                    appType: $(WEBAPP_TYPE)
+                    slotName: $(WEBAPP_SLOT)

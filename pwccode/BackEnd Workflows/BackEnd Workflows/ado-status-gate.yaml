@@ -1,0 +1,442 @@
+name: 'ADO Work Item Status Gate'
+run-name: 'ADO Work Item Status Gate'
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches:
+      - main
+      - release/**
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ado-status-check:
+    name: "ADO Work Item Status Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract ADO Work Item IDs from PR
+        id: extract-work-items
+        run: |
+          # Extract AB# work item IDs from PR title and body
+          PR_TITLE=$(cat << 'EOF'
+          ${{ github.event.pull_request.title }}
+          EOF
+          )
+
+          PR_BODY=$(cat << 'EOF'
+          ${{ github.event.pull_request.body }}
+          EOF
+          )
+
+          # Combine title and body for searching
+          SEARCH_TEXT="$PR_TITLE $PR_BODY"
+
+          # Extract all AB# patterns (case insensitive)
+          WORK_ITEMS=$(echo "$SEARCH_TEXT" | grep -oiE 'AB#[0-9]+' | sort -u | tr '[:lower:]' '[:upper:]')
+
+          if [ -z "$WORK_ITEMS" ]; then
+            echo "No ADO work items found in PR title or body"
+            echo "work-items=" >> $GITHUB_OUTPUT
+            echo "has-work-items=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found work items: $WORK_ITEMS"
+            # Convert to comma-separated list and remove AB# prefix
+            WORK_ITEM_IDS=$(echo "$WORK_ITEMS" | sed 's/AB#//g' | tr '\n' ',' | sed 's/,$//')
+            echo "work-items=$WORK_ITEM_IDS" >> $GITHUB_OUTPUT
+            echo "has-work-items=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate ADO PAT Secret
+        id: validate-pat
+        if: steps.extract-work-items.outputs.has-work-items == 'true'
+        env:
+          ADO_PAT: ${{ secrets.CONCOURSE_CORE_AUTOMATION_ADO_PAT }}
+        run: |
+          if [ -z "$ADO_PAT" ]; then
+            echo "❌ CONCOURSE_CORE_AUTOMATION_ADO_PAT secret is not set or is empty"
+            echo "pat-valid=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ ADO PAT secret is available"
+            echo "pat-valid=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate ADO Configuration
+        id: validate-config
+        if: steps.extract-work-items.outputs.has-work-items == 'true'
+        env:
+          ADO_PAT: ${{ secrets.CONCOURSE_CORE_AUTOMATION_ADO_PAT }}
+          ADO_ORG: ${{ vars.CONCOURSE_CORE_ADO_ORG }}
+        run: |
+          CONFIG_VALID=true
+
+          if [ -z "$ADO_PAT" ]; then
+            echo "❌ CONCOURSE_CORE_AUTOMATION_ADO_PAT secret is not set or is empty"
+            CONFIG_VALID=false
+          else
+            echo "✅ ADO PAT secret is available"
+          fi
+
+          if [ -z "$ADO_ORG" ]; then
+            echo "❌ CONCOURSE_CORE_ADO_ORG variable is not set or is empty"
+            CONFIG_VALID=false
+          else
+            echo "✅ ADO organization variable is set: $ADO_ORG"
+
+            # Test if the organization exists by making a simple API call
+            echo "🔍 Validating Azure DevOps organization access..."
+
+            RESPONSE_FILE=$(mktemp)
+            HTTP_STATUS=$(curl -w "%{http_code}" \
+              -u ":$ADO_PAT" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -o "$RESPONSE_FILE" \
+              --max-time 15 \
+              --retry 1 \
+              --retry-delay 1 \
+              "https://dev.azure.com/$ADO_ORG/_apis/projects?api-version=7.0&\$top=1")
+
+            echo "Organization validation HTTP Status: $HTTP_STATUS"
+
+            if [ "$HTTP_STATUS" -eq 200 ]; then
+              echo "✅ Azure DevOps organization '$ADO_ORG' is accessible"
+            elif [ "$HTTP_STATUS" -eq 401 ]; then
+              echo "❌ Authentication failed - Invalid or expired PAT token"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CONFIG_VALID=false
+            elif [ "$HTTP_STATUS" -eq 404 ]; then
+              echo "❌ Azure DevOps organization '$ADO_ORG' not found or not accessible"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CONFIG_VALID=false
+            elif [ "$HTTP_STATUS" -eq 403 ]; then
+              echo "❌ Access denied to Azure DevOps organization '$ADO_ORG'"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CONFIG_VALID=false
+            elif [ "$HTTP_STATUS" -eq 000 ]; then
+              echo "❌ Network error connecting to Azure DevOps"
+              CONFIG_VALID=false
+            else
+              echo "❌ Unexpected error validating organization (HTTP $HTTP_STATUS)"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CONFIG_VALID=false
+            fi
+
+            rm -f "$RESPONSE_FILE"
+          fi
+
+          echo "config-valid=$CONFIG_VALID" >> $GITHUB_OUTPUT
+
+          if [ "$CONFIG_VALID" = "false" ]; then
+            echo ""
+            echo "🔧 To resolve this issue:"
+            echo "1. Ensure CONCOURSE_CORE_AUTOMATION_ADO_PAT secret is set and valid"
+            echo "2. Ensure CONCOURSE_CORE_ADO_ORG variable contains the correct organization name"
+            echo "3. Verify the PAT has permissions to access the specified organization"
+            echo "4. Check that the organization name matches exactly (case-sensitive)"
+            echo "5. Ensure the PAT has 'Project and team (read)' permissions at minimum"
+            exit 1
+          fi
+
+      - name: Check ADO Work Item Status
+        id: check-status
+        if: steps.extract-work-items.outputs.has-work-items == 'true' && steps.validate-config.outputs.config-valid == 'true'
+        env:
+          ADO_PAT: ${{ secrets.CONCOURSE_CORE_AUTOMATION_ADO_PAT }}
+          ADO_ORG: ${{ vars.CONCOURSE_CORE_ADO_ORG }}
+        run: |
+          WORK_ITEMS="${{ steps.extract-work-items.outputs.work-items }}"
+          BLOCKED_ITEMS=""
+          CRITICAL_ERRORS=""
+
+          # Define allowed statuses by work item type
+          declare -A ALLOWED_STATUSES_BY_TYPE
+          ALLOWED_STATUSES_BY_TYPE["Bug"]="Closed"
+          ALLOWED_STATUSES_BY_TYPE["Defect"]="7 - Pending Acceptance,Closed"
+          ALLOWED_STATUSES_BY_TYPE["Remediation Plan"]="Closed"
+          ALLOWED_STATUSES_BY_TYPE["User Story"]="7 - Pending Acceptance,Closed"
+
+          # Split work items by comma
+          IFS=',' read -ra WORK_ITEM_ARRAY <<< "$WORK_ITEMS"
+
+          for WORK_ITEM_ID in "${WORK_ITEM_ARRAY[@]}"; do
+            echo "Checking work item: $WORK_ITEM_ID"
+
+            # Create temporary files for response and headers
+            RESPONSE_FILE=$(mktemp)
+            HEADERS_FILE=$(mktemp)
+
+            # Call Azure DevOps REST API with error handling
+            HTTP_STATUS=$(curl -w "%{http_code}" \
+              -u ":$ADO_PAT" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -o "$RESPONSE_FILE" \
+              -D "$HEADERS_FILE" \
+              --max-time 30 \
+              --retry 2 \
+              --retry-delay 1 \
+              "https://dev.azure.com/$ADO_ORG/_apis/wit/workitems/$WORK_ITEM_ID?api-version=7.0")
+
+            echo "HTTP Status: $HTTP_STATUS"
+
+            # Check HTTP status code
+            if [ "$HTTP_STATUS" -eq 200 ]; then
+              # Parse response for work item details
+              if jq -e '.fields' "$RESPONSE_FILE" > /dev/null 2>&1; then
+                STATUS=$(jq -r '.fields["System.State"]' "$RESPONSE_FILE")
+                WORK_ITEM_TYPE=$(jq -r '.fields["System.WorkItemType"]' "$RESPONSE_FILE")
+
+                echo "Work item $WORK_ITEM_ID type: $WORK_ITEM_TYPE"
+                echo "Work item $WORK_ITEM_ID status: $STATUS"
+
+                # Get allowed statuses for this work item type
+                ALLOWED_STATUSES="${ALLOWED_STATUSES_BY_TYPE[$WORK_ITEM_TYPE]}"
+
+                if [ -z "$ALLOWED_STATUSES" ]; then
+                  echo "⚠️  Work item $WORK_ITEM_ID has unknown type '$WORK_ITEM_TYPE' - using default allowed statuses"
+                  ALLOWED_STATUSES="7 - Pending Acceptance,Closed"
+                fi
+
+                echo "Allowed statuses for $WORK_ITEM_TYPE: $ALLOWED_STATUSES"
+
+                # Check if status is in allowed list for this work item type
+                if [[ ",$ALLOWED_STATUSES," != *",$STATUS,"* ]]; then
+                  echo "❌ Work item $WORK_ITEM_ID ($WORK_ITEM_TYPE) has status '$STATUS' which is not allowed"
+                  echo "   Allowed statuses for $WORK_ITEM_TYPE: $ALLOWED_STATUSES"
+                  BLOCKED_ITEMS="$BLOCKED_ITEMS,$WORK_ITEM_ID:$STATUS:$WORK_ITEM_TYPE"
+                else
+                  echo "✅ Work item $WORK_ITEM_ID ($WORK_ITEM_TYPE) has allowed status '$STATUS'"
+                fi
+              else
+                echo "❌ Invalid JSON response for work item $WORK_ITEM_ID"
+                echo "Response content:"
+                cat "$RESPONSE_FILE"
+                BLOCKED_ITEMS="$BLOCKED_ITEMS,$WORK_ITEM_ID:INVALID_RESPONSE:UNKNOWN"
+              fi
+            elif [ "$HTTP_STATUS" -eq 401 ]; then
+              echo "❌ Authentication failed (HTTP 401) - Invalid or expired PAT token"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CRITICAL_ERRORS="$CRITICAL_ERRORS,$WORK_ITEM_ID:AUTH_FAILED"
+            elif [ "$HTTP_STATUS" -eq 404 ]; then
+              echo "❌ Work item $WORK_ITEM_ID not found (HTTP 404)"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CRITICAL_ERRORS="$CRITICAL_ERRORS,$WORK_ITEM_ID:NOT_FOUND"
+            elif [ "$HTTP_STATUS" -eq 403 ]; then
+              echo "❌ Access denied to work item $WORK_ITEM_ID (HTTP 403) - Check permissions"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              CRITICAL_ERRORS="$CRITICAL_ERRORS,$WORK_ITEM_ID:ACCESS_DENIED"
+            elif [ "$HTTP_STATUS" -eq 000 ]; then
+              echo "❌ Network error or timeout for work item $WORK_ITEM_ID"
+              CRITICAL_ERRORS="$CRITICAL_ERRORS,$WORK_ITEM_ID:NETWORK_ERROR"
+            else
+              echo "❌ API call failed for work item $WORK_ITEM_ID with HTTP status: $HTTP_STATUS"
+              echo "Response content:"
+              cat "$RESPONSE_FILE"
+              echo "Response headers:"
+              cat "$HEADERS_FILE"
+              CRITICAL_ERRORS="$CRITICAL_ERRORS,$WORK_ITEM_ID:HTTP_$HTTP_STATUS"
+            fi
+
+            # Clean up temporary files
+            rm -f "$RESPONSE_FILE" "$HEADERS_FILE"
+          done
+
+          # Check for critical errors that should fail the workflow immediately
+          CRITICAL_ERRORS=$(echo "$CRITICAL_ERRORS" | sed 's/^,//')
+          if [ -n "$CRITICAL_ERRORS" ]; then
+            echo "💥 Critical errors encountered that prevent workflow execution:"
+            IFS=',' read -ra CRITICAL_ARRAY <<< "$CRITICAL_ERRORS"
+            for CRITICAL_ERROR in "${CRITICAL_ARRAY[@]}"; do
+              IFS=':' read -ra ERROR_PARTS <<< "$CRITICAL_ERROR"
+              ERROR_ID="${ERROR_PARTS[0]}"
+              ERROR_TYPE="${ERROR_PARTS[1]}"
+              echo "   - Work Item $ERROR_ID: $ERROR_TYPE"
+            done
+            echo ""
+            echo "🔧 Resolution steps:"
+            case "$CRITICAL_ERRORS" in
+              *AUTH_FAILED*)
+                echo "   - Verify CONCOURSE_CORE_AUTOMATION_ADO_PAT secret is valid and not expired"
+                echo "   - Check PAT permissions include 'Work Items (read)'"
+                ;;
+              *NOT_FOUND*)
+                echo "   - Verify work item IDs are correct (AB# format)"
+                echo "   - Check if work items exist in the Azure DevOps organization"
+                echo "   - Ensure work items are in the correct project"
+                ;;
+              *ACCESS_DENIED*)
+                echo "   - Verify PAT has sufficient permissions to access work items"
+                echo "   - Check if work items are in the correct Azure DevOps organization/project"
+                ;;
+              *NETWORK_ERROR*)
+                echo "   - Check network connectivity to Azure DevOps"
+                echo "   - Verify ADO_ORG variable is correct: $ADO_ORG"
+                ;;
+              *)
+                echo "   - Check Azure DevOps service status"
+                echo "   - Verify API endpoint and parameters"
+                ;;
+            esac
+            exit 1
+          fi
+
+          # Remove leading comma from blocked items
+          BLOCKED_ITEMS=$(echo "$BLOCKED_ITEMS" | sed 's/^,//')
+
+          if [ -n "$BLOCKED_ITEMS" ]; then
+            echo "blocked-items=$BLOCKED_ITEMS" >> $GITHUB_OUTPUT
+            echo "status=blocked" >> $GITHUB_OUTPUT
+          else
+            echo "blocked-items=" >> $GITHUB_OUTPUT
+            echo "status=allowed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post Status Comment
+        if: steps.extract-work-items.outputs.has-work-items == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workItems = '${{ steps.extract-work-items.outputs.work-items }}';
+            const status = '${{ steps.check-status.outputs.status }}';
+            const blockedItems = '${{ steps.check-status.outputs.blocked-items }}';
+            const adoOrg = '${{ vars.CONCOURSE_CORE_ADO_ORG }}';
+
+            let commentBody = '## 🔍 ADO Work Item Status Check\n\n';
+
+            if (status === 'blocked') {
+              commentBody += '❌ **PR Blocked** - Work items not ready for merge\n\n';
+              commentBody += '**Blocked Items:**\n';
+
+              const blocked = blockedItems.split(',');
+              for (const item of blocked) {
+                const [id, itemStatus, itemType] = item.split(':');
+
+                // Define required statuses by work item type
+                let requiredStatuses;
+                switch (itemType) {
+                  case 'Bug':
+                    requiredStatuses = 'Closed';
+                    break;
+                  case 'Defect':
+                    requiredStatuses = '7 - Pending Acceptance, Closed';
+                    break;
+                  case 'Remediation Plan':
+                    requiredStatuses = 'Closed';
+                    break;
+                  case 'User Story':
+                    requiredStatuses = '7 - Pending Acceptance, Closed';
+                    break;
+                  default:
+                    requiredStatuses = '7 - Pending Acceptance, Closed';
+                }
+
+                commentBody += `- <a href="https://dev.azure.com/${adoOrg}/_workitems/edit/${id}" target="_blank">AB#${id}</a> (${itemType}): Current Status "${itemStatus}" | Required: ${requiredStatuses}\n`;
+              }
+
+              commentBody += '\n**Allowed Statuses:** 7 - Pending Acceptance, Closed\n\n';
+              commentBody += '**🔧 To resolve:** Update the work items above to "7 - Pending Acceptance" or "Closed" status in Azure DevOps.\n\n';
+            } else if (status === 'allowed') {
+              commentBody += '✅ **All work items ready for merge**\n\n';
+              const items = workItems.split(',');
+              for (const item of items) {
+                commentBody += `- <a href="https://dev.azure.com/${adoOrg}/_workitems/edit/${item}" target="_blank">AB#${item}</a>: Ready ✅\n`;
+              }
+            }
+
+            // Find existing comment and update or create new
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(comment =>
+              comment.body.includes('ADO Work Item Status Check')
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Block PR if Status Check Fails
+        if: steps.check-status.outputs.status == 'blocked'
+        run: |
+          echo "❌ PR is blocked due to work item status requirements"
+          echo "Blocked items: ${{ steps.check-status.outputs.blocked-items }}"
+          echo ""
+          echo "📋 Required statuses by work item type:"
+          echo "   - Bug: Closed"
+          echo "   - Defect: 7 - Pending Acceptance, Closed"
+          echo "   - Remediation Plan: Closed"
+          echo "   - User Story: 7 - Pending Acceptance, Closed"
+          echo ""
+          echo "🔧 To resolve this issue:"
+          echo "1. Open the specific work item(s) listed below in Azure DevOps"
+          echo "2. Update the work item(s) to the required status for their type"
+          echo "3. Re-run this workflow or push a new commit to trigger the check again"
+          echo ""
+          echo "📋 Work items that need status updates:"
+          IFS=',' read -ra BLOCKED_ARRAY <<< "${{ steps.check-status.outputs.blocked-items }}"
+          for BLOCKED_ITEM in "${BLOCKED_ARRAY[@]}"; do
+            IFS=':' read -ra ITEM_PARTS <<< "$BLOCKED_ITEM"
+            ITEM_ID="${ITEM_PARTS[0]}"
+            ITEM_STATUS="${ITEM_PARTS[1]}"
+            ITEM_TYPE="${ITEM_PARTS[2]}"
+
+            case "$ITEM_TYPE" in
+              "Bug")
+                REQUIRED_STATUSES="Closed"
+                ;;
+              "Defect")
+                REQUIRED_STATUSES="7 - Pending Acceptance, Closed"
+                ;;
+              "Remediation Plan")
+                REQUIRED_STATUSES="Closed"
+                ;;
+              "User Story")
+                REQUIRED_STATUSES="7 - Pending Acceptance, Closed"
+                ;;
+              *)
+                REQUIRED_STATUSES="7 - Pending Acceptance, Closed (default)"
+                ;;
+            esac
+
+            echo "   - AB#$ITEM_ID ($ITEM_TYPE) → Current: $ITEM_STATUS | Required: $REQUIRED_STATUSES"
+            echo "     URL: https://dev.azure.com/$ADO_ORG/_workitems/edit/$ITEM_ID"
+          done
+          exit 1
+        env:
+          ADO_ORG: ${{ vars.CONCOURSE_CORE_ADO_ORG }}
+      - name: Success
+        if: steps.extract-work-items.outputs.has-work-items == 'false' || steps.check-status.outputs.status == 'allowed'
+        run: |
+          if [ "${{ steps.extract-work-items.outputs.has-work-items }}" == "false" ]; then
+            echo "✅ No ADO work items found - check passed"
+          else
+            echo "✅ All work items have acceptable status - check passed"
+          fi
