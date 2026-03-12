@@ -1,0 +1,38 @@
+# Starter pipeline with inline variables and parameters
+# This keeps the same basic shape as azure-pipelines.yaml.
+
+trigger:
+- main
+
+parameters:
+- name: userName
+  type: string
+  default: world
+- name: environment
+  type: string
+  default: dev
+  values:
+  - dev
+  - qa
+  - prod
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+- name: greeting
+  value: Hello
+- name: buildMode
+  value: Release
+- name: selectedEnvironment
+  value: ${{ parameters.environment }}
+
+steps:
+- script: echo $(greeting), ${{ parameters.userName }}!
+  displayName: 'Run a one-line script'
+
+- script: |
+    echo Environment from parameter: $(selectedEnvironment)
+    echo Build mode from inline variable: $(buildMode)
+    echo Add other tasks to build, test, and deploy your project.
+  displayName: 'Run a multi-line script'
