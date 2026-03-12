@@ -7,6 +7,6 @@ stages:
 - stage: ${{ parameters.stageName }}
   displayName: 'Build Stage'
   jobs:
-  - template: templates/nested/job-template.yaml
+  - template: job-template.yaml
     parameters:
       jobName: BuildJob
