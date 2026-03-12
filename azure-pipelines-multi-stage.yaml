@@ -1,0 +1,28 @@
+# Simple multi-stage pipeline
+
+trigger:
+- main
+
+stages:
+- stage: Build
+  displayName: 'Build Stage'
+  jobs:
+  - job: BuildJob
+    displayName: 'Hello World Build Job'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: echo Hello, world from Build!
+      displayName: 'Run hello world script in Build'
+
+- stage: Deploy
+  displayName: 'Deploy Stage'
+  dependsOn: Build
+  jobs:
+  - job: DeployJob
+    displayName: 'Hello World Deploy Job'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: echo Hello, world from Deploy!
+      displayName: 'Run hello world script in Deploy'

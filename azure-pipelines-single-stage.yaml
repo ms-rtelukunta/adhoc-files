@@ -1,0 +1,16 @@
+# Simple single-stage pipeline
+
+trigger:
+- main
+
+stages:
+- stage: Build
+  displayName: 'Single Stage'
+  jobs:
+  - job: HelloWorld
+    displayName: 'Hello World Job'
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: echo Hello, world!
+      displayName: 'Run hello world script'
