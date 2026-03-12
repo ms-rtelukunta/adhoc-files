@@ -1,0 +1,11 @@
+# Simple nested pipeline with template chaining
+# file 1 -> file 2 -> file 3
+
+trigger:
+- main
+
+stages:
+- template: templates/nested/stage-template.yaml
+  parameters:
+    stageName: Build
+

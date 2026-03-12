@@ -1,0 +1,13 @@
+parameters:
+- name: jobName
+  type: string
+  default: BuildJob
+
+jobs:
+- job: ${{ parameters.jobName }}
+  displayName: 'Build Job'
+  pool:
+    vmImage: ubuntu-latest
+  steps:
+  - script: echo Hello from nested template level 3!
+    displayName: 'Hello step'

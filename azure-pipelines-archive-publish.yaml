@@ -1,0 +1,29 @@
+# Very basic pipeline: Archive and Publish
+
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+- script: |
+    mkdir -p output
+    echo "Hello, world!" > output/hello.txt
+  displayName: 'Create sample file'
+
+- task: ArchiveFiles@2
+  displayName: 'Archive output folder'
+  inputs:
+    rootFolderOrFile: 'output'
+    includeRootFolder: false
+    archiveType: zip
+    archiveFile: '$(Build.ArtifactStagingDirectory)/sample.zip'
+    replaceExistingArchive: true
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish artifact'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/sample.zip'
+    ArtifactName: 'drop'
+    publishLocation: 'Container'
