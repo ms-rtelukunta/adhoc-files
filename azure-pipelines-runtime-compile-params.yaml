@@ -1,0 +1,38 @@
+# Starter pipeline showing compile-time and runtime evaluation
+# Compile-time: ${{ }}
+# Runtime: $[] and $( )
+
+trigger:
+- main
+
+parameters:
+- name: userName
+  type: string
+  default: world
+- name: runExtendedStep
+  type: boolean
+  default: false
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+- name: greeting
+  value: Hello
+- name: isMainBranch
+  value: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+steps:
+- script: echo $(greeting), ${{ parameters.userName }}!
+  displayName: 'Run a one-line script'
+
+- script: |
+    echo Branch: $(Build.SourceBranch)
+    echo isMainBranch (runtime expression): $(isMainBranch)
+  displayName: 'Show runtime values'
+
+- ${{ if eq(parameters.runExtendedStep, true) }}:
+  - script: |
+      echo This step is included at compile time.
+      echo Parameter runExtendedStep = ${{ parameters.runExtendedStep }}
+    displayName: 'Compile-time conditional step'
