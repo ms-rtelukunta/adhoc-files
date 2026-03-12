@@ -27,8 +27,8 @@ steps:
   displayName: 'Run a one-line script'
 
 - script: |
-    echo Branch: $(Build.SourceBranch)
-    echo isMainBranch (runtime expression): $(isMainBranch)
+  echo "Branch: $(Build.SourceBranch)"
+  echo "isMainBranch (runtime expression): $(isMainBranch)"
   displayName: 'Show runtime values'
 
 - ${{ if eq(parameters.runExtendedStep, true) }}:
