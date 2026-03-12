@@ -27,11 +27,11 @@ steps:
   displayName: 'Run a one-line script'
 
 - script: |
-  echo "Branch: $(Build.SourceBranch)"
-  echo "isMainBranch (runtime expression): $(isMainBranch)"
+    echo "Branch: $(Build.SourceBranch)"
+    echo "isMainBranch (runtime expression): $(isMainBranch)"
   displayName: 'Show runtime values'
 
-- ${{ if eq(parameters.runExtendedStep, true) }}:
+- ${{ if parameters.runExtendedStep }}:
   - script: |
       echo This step is included at compile time.
       echo Parameter runExtendedStep = ${{ parameters.runExtendedStep }}
