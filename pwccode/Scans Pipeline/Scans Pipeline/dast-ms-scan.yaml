@@ -35,9 +35,6 @@ parameters:
    displayName: "netspartkerjob"
  
 variables:
-- group: infra-devops-secrets
-- group: ConcourseCore 
-- group: ${{ parameters.ENVIRONMENT }}
 - name: 'ENVIRONMENT'
   value: ${{ parameters.ENVIRONMENT }}
 jobs:
