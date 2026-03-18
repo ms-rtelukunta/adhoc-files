@@ -27,7 +27,6 @@
 
 # --- from LEAP-Host/azure-pipelines.yml (template: ado-vars.yml + groups) ---
 variables:
-  - template: 'ado-vars.yml'
   - group: 'leap-common'
   - group: 'LEAP Common Configs'
 
@@ -102,8 +101,6 @@ stages:
     jobs:
       # --- from templates/main/compile-job.yml ---
       - job: compile
-        variables:
-          - template: ado-vars.yml
         workspace:
           clean: all
         steps:
@@ -166,8 +163,6 @@ stages:
       - job: sonar
         dependsOn: compile
         condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_SONAR_SCAN, 'false'))
-        variables:
-          - template: ado-vars.yml
         workspace:
           clean: all
         steps:
@@ -198,8 +193,7 @@ stages:
       - job: veracode
         dependsOn: compile
         condition: and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables.FLAG_VERACODE_SCAN, 'false'))
-        variables:
-          - template: ado-vars.yml
+   
         workspace:
           clean: all
         steps:
@@ -225,8 +219,6 @@ stages:
       - job: UnitTest
         dependsOn: compile
         condition: eq(variables['Build.Reason'], 'PullRequest')
-        variables:
-          - template: ado-vars.yml
         workspace:
           clean: all
         steps:
@@ -265,8 +257,6 @@ stages:
     jobs:
       # --- from templates/main/compile-job.yml (same as PrValidation compile) ---
       - job: compile
-        variables:
-          - template: ado-vars.yml
         workspace:
           clean: all
         steps:
@@ -324,8 +314,6 @@ stages:
       - job: package
         condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
         dependsOn: compile
-        variables:
-          - template: ado-vars.yml
         workspace:
           clean: all
         steps:
@@ -365,8 +353,6 @@ stages:
     dependsOn: build
     jobs:
       - job: vars
-        variables:
-          - template: ado-vars.yml
       # In original deploy-stage.yml this job is under ${{ if eq(variables.CONTINUOUS_DEPLOYMENT, true) }} and ${{ if eq(variables.DEPLOYMENT_TYPE, 'webapp') }}
       # --- from deploy-stage.yml: DEPLOYMENT_TYPE=webapp => template webapp-deployment-job.yml ---
       - deployment: deploy
