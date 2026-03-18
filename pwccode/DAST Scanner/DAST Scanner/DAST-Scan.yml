@@ -9,12 +9,6 @@ pool:
   name: 'dds-concourse-ubuntu2004-01'
   workspace:
     clean: all
-resources:
-  repositories:
-  - repository: library
-    type: git
-    name: InfraDevOps/digital-cicd
-    ref: refs/heads/main
 parameters:
 - name: ENVIRONMENT
   displayName: ENVIRONMENT
