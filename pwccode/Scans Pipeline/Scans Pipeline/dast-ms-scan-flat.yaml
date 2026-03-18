@@ -1,0 +1,84 @@
+trigger:
+- main
+
+pr:
+  branches:
+    include:
+    - main
+
+pool:
+  name: 'dds-concourse-ubuntu2004-01'
+  workspace:
+    clean: all
+
+parameters:
+- name: ENVIRONMENT
+  displayName: ENVIRONMENT
+  type: string
+  default: us-int
+  values:
+    - us-dev
+    - us-qa
+    - us-perf
+    - us-int
+    - us-stage
+    - eu-stage
+- name: cfg
+  type: object
+  default:
+    endpoint: $(NETSPARKER_MS_ENDPOINT)
+    scanWebSitesProfile: $(NETSPARKER_MS_PROFILE_ID)
+    scanWebSites: $(NETSPARKER_MS_WEBSITE_ID)
+    jobOptions:
+      timeoutInMinutes: 480
+    buildFail: true
+    severity: DoNotFail
+    hasReport: true
+    reportType: ScanDetail
+    onlyUnconfirmedIssues: true
+    excludeAddressedIssues: true
+    ignoreFalsePositive: true
+    ignoreRiskAccepted: true
+    stopScan: true
+- name: ctx
+  type: object
+  default:
+    name: netsparker
+    display: netsparker job
+
+variables:
+- name: ENVIRONMENT
+  value: ${{ parameters.ENVIRONMENT }}
+
+jobs:
+- job: ${{ coalesce(parameters.ctx.name, 'netsparker') }}
+  displayName: ${{ coalesce(parameters.ctx.display, 'netsparker job') }}
+  timeoutInMinutes: ${{ parameters.cfg.jobOptions.timeoutInMinutes }}
+  steps:
+  - checkout: none
+
+  - ${{ each step in parameters.cfg.beforeScan }}:
+    - ${{ step }}
+
+  - ${{ if parameters.cfg.custom }}:
+    - ${{ each step in parameters.cfg.custom }}:
+      - ${{ step }}
+  - ${{ else }}:
+    - task: netsparker-cloud@1
+      inputs:
+        apiConnection: ${{ parameters.cfg.endpoint }}
+        scanTypes: ${{ coalesce(parameters.cfg.scanType, '2') }}
+        scanWebSites: ${{ parameters.cfg.scanWebSites }}
+        scanWebSitesProfile: ${{ parameters.cfg.scanWebSitesProfile }}
+        buildFail: ${{ coalesce(parameters.cfg.buildFail, 'true') }}
+        severity: ${{ coalesce(parameters.cfg.severity, 'DoNotFail') }}
+        hasReport: ${{ coalesce(parameters.cfg.hasReport, 'true') }}
+        reportType: ${{ coalesce(parameters.cfg.reportType, 'ScanDetail') }}
+        onlyUnconfirmedIssues: ${{ coalesce(parameters.cfg.onlyUnconfirmedIssues, 'true') }}
+        excludeAddressedIssues: ${{ coalesce(parameters.cfg.excludeAddressedIssues, 'true') }}
+        ignoreFalsePositive: ${{ coalesce(parameters.cfg.ignoreFalsePositive, 'true') }}
+        ignoreRiskAccepted: ${{ coalesce(parameters.cfg.ignoreRiskAccepted, 'true') }}
+        stopScan: ${{ coalesce(parameters.cfg.stopScan, 'true') }}
+
+  - ${{ each step in parameters.cfg.postScan }}:
+    - ${{ step }}
