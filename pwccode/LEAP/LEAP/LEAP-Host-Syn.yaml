@@ -45,9 +45,6 @@ stages:
   - stage: validate
     jobs:
       - job: check_global_variables
-        # from validate.yml: variables template ado-vars.yml@Self (APP_DIR='' => ado-vars.yml)
-        variables:
-          - template: ado-vars.yml
         steps:
           # --- from templates/main/variables-validation.yml (template: ../lib/validations/project-vars-validation.yml) ---
           - bash: |
