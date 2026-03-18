@@ -23,12 +23,7 @@
 # =============================================================================
 
 # --- from LEAP-Host/azure-pipelines.yml ---
-resources:
-  repositories:
-    - repository: AzureTemplates
-      type: git
-      name: InfraDevOps/ado-templates
-      ref: refs/heads/feature/leap
+
 
 # --- from LEAP-Host/azure-pipelines.yml (template: ado-vars.yml + groups) ---
 variables:
