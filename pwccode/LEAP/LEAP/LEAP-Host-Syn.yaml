@@ -25,15 +25,6 @@
 # --- from LEAP-Host/azure-pipelines.yml ---
 
 
-# --- from LEAP-Host/azure-pipelines.yml (template: ado-vars.yml + groups) ---
-variables:
-  - group: 'leap-common'
-  - group: 'LEAP Common Configs'
-
-pool:
-  name: 'dds-concourse-ubuntu2004-01'
-  workspace:
-    clean: all
 
 trigger:
   - main
