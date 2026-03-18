@@ -1,23 +1,12 @@
 # File: scan-netsparker.yaml
-trigger: none
-pr:
-  branches:
-    include:
-    - none
+trigger:
+- main
 
 pool:
   name: 'dds-concourse-ubuntu2004-01'
   workspace:
     clean: all
 
-resources:
-  repositories:
-  - repository: library
-    type: git
-    name: InfraDevOps/digital-cicd
-    ref: refs/heads/main
-
-    
 parameters:
 - name: ENVIRONMENT
   displayName: ENVIRONMENT
@@ -52,7 +41,7 @@ variables:
 - name: 'ENVIRONMENT'
   value: ${{ parameters.ENVIRONMENT }}
 jobs:
-- template: templates/jobs/scan-netsparker.yaml@library
+- template: ../../DAST Scanner/DAST Scanner/scan-netsparker.yaml
   parameters:
     cfg: ${{ parameters.cfg }}
     ctx: ${{ parameters.ctx }}

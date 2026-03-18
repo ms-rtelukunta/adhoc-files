@@ -12,14 +12,6 @@ pool:
   workspace:
     clean: all
 
-resources:
-  repositories:
-  - repository: library
-    type: git
-    name: InfraDevOps/digital-cicd
-    ref: refs/heads/main
-
-    
 parameters:
 - name: ENVIRONMENT
   displayName: ENVIRONMENT
@@ -46,7 +38,7 @@ parameters:
   type: object
   default: 
    name: "netsparker"
-   displayName: "netspartkerjob"
+   display: "netsparker job"
  
 variables:
 - group: infra-devops-secrets
@@ -55,7 +47,7 @@ variables:
 - name: 'ENVIRONMENT'
   value: ${{ parameters.ENVIRONMENT }}
 jobs:
-- template: templates/jobs/scan-netsparker.yaml@library
+- template: ../../DAST Scanner/DAST Scanner/scan-netsparker.yaml
   parameters:
     cfg: ${{ parameters.cfg }}
     ctx: ${{ parameters.ctx }}
