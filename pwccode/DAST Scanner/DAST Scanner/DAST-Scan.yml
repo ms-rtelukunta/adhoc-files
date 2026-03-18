@@ -1,6 +1,6 @@
 name: us-int
 trigger:
-  enabled: false
+  - main
 pr:
   branches:
     include:
