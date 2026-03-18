@@ -37,14 +37,7 @@ pool:
     clean: all
 
 trigger:
-  batch: true
-  branches:
-    include:
-      - develop
-  paths:
-    exclude:
-      - mfe-azure-pipelines.yml
-      - blackduck-pipeline.yml
+  - main
 
 # --- from templates/main/pipeline.yml (replaces template: validate.yml) ---
 stages:
