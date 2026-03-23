@@ -37,9 +37,6 @@ parameters:
     name: "netsparker"
     displayName: "netspartkerjob"
 variables:
-- group: infra-devops-secrets
-- group: ConcourseCore
-- group: us-int
 - name: 'ENVIRONMENT'
   value: us-int
 stages:
