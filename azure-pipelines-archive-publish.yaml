@@ -1,6 +1,7 @@
 # Very basic pipeline: Archive and Publish
 
-trigger: none
+trigger:
+- main
 
 pool:
   vmImage: ubuntu-latest

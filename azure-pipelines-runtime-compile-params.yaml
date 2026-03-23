@@ -2,7 +2,8 @@
 # Compile-time: ${{ }}
 # Runtime: $[] and $( )
 
-trigger: none
+trigger:
+- main
 
 parameters:
 - name: userName

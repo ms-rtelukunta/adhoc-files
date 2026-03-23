@@ -1,7 +1,8 @@
 # Starter pipeline with inline variables and parameters
 # This keeps the same basic shape as azure-pipelines.yaml.
 
-trigger: none
+trigger:
+- main
 
 parameters:
 - name: userName

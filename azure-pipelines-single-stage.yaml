@@ -1,6 +1,7 @@
 # Simple single-stage pipeline
 
-trigger: none
+trigger:
+- main
 
 stages:
 - stage: Build
