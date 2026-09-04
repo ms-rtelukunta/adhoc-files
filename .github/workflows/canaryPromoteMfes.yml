@@ -1,0 +1,87 @@
+# This workflow was automatically converted from Azure Pipelines
+# Conversion date: 2026-09-04 12:27:50 UTC
+# Please review and test before using in production
+
+name: CanaryPromoteMfes
+on:
+  workflow_dispatch:
+    inputs:
+      RELEASE_LABEL:
+        description: RELEASE_LABEL
+        type: string
+        default: CO.2024.Q4.3.0.14
+        required: false
+      environmentType:
+        description: environmentType
+        type: choice
+        options:
+        - us-stage
+        - us-prod
+        - emea-stage
+        - emea-prod
+        - apac-stage
+        - apac-prod
+        default: us-stage
+        required: false
+env:
+  VARIABLE_GROUP_ENVIRONMENTTYPE: ${{ inputs.environmentType }}
+  ENVIRONMENT: ${{ inputs.environmentType }}
+  RELEASE_LABEL: ${{ inputs.RELEASE_LABEL }}
+jobs:
+  deploy_deploy:
+    runs-on: ubuntu-latest
+    environment: $(ENVIRONMENT)
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    - name: Load Variable Groups
+      id: load_variable_groups
+      shell: bash
+      env:
+        TESTMIGRATION__CONCOURSECORE__SECRETTEST: ${{ secrets.TESTMIGRATION__CONCOURSECORE__SECRETTEST }}
+        TESTMIGRATION__CONCOURSECORE__LD_API_AUTH_TOKEN: ${{ secrets.TESTMIGRATION__CONCOURSECORE__LD_API_AUTH_TOKEN }}
+        TESTMIGRATION__CONCOURSECORE__APPVERSION: ${{ secrets.TESTMIGRATION__CONCOURSECORE__APPVERSION }}
+      run: >-
+        python3 - <<'PYEOF'
+
+        import yaml, os, re
+
+        with open('.github/variables/global.yaml') as f:
+            all_groups = yaml.safe_load(f) or {}
+        groups_to_load = ['ConcourseCore']  # Qualified names: 'Project::GroupName'
+
+        secret_pattern = re.compile(r'^\[SECRET-FROM-REPOSECRET:(.+)\]$')
+
+        with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+            for g in groups_to_load:
+                group_vars = all_groups.get(g, {})
+                if not group_vars:
+                    print(f'Warning: Variable group {g} not found in global.yaml')
+                    continue
+                for k, v in group_vars.items():
+                    if k.startswith('#'): continue
+                    m = secret_pattern.match(str(v))
+                    if m:
+                        qualified = m.group(1)
+                        val = os.environ.get(qualified, '')
+                        if val:
+                            print('::add-mask::' + val)
+                            env_file.write(k + '=' + val + chr(10))
+                    else:
+                        env_file.write(k + '=' + str(v) + chr(10))
+        PYEOF
+    - name: ── Deploy ──
+    - uses: actions/checkout@v4
+    - name: LanchDarkly
+      run: ./update-default-ld-rule.sh
+      shell: bash
+      working-directory: ${{ github.workspace }}/s/deploy
+      env:
+        API_KEY: ${{ env.LD_API_AUTH_TOKEN }}
+        appVersion: ${{ env.APPVERSION }}
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+  checks: write
+  pull-requests: write
